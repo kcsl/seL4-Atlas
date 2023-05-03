@@ -1,14 +1,8 @@
-
+#line 1 "/Users/payas/git/seL4/src/api/faults.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -16,8 +10,12 @@
 #include <api/faults.h>
 #include <api/syscall.h>
 #include <kernel/thread.h>
-#include <arch/x86/arch/kernel/thread.h>
+#include <arch/kernel/thread.h>
 #include <machine/debug.h>
+#ifdef CONFIG_KERNEL_MCS
+#include <mode/api/ipc_buffer.h>
+#include <object/schedcontext.h>
+#endif
 
 /* consistency with libsel4 */
 compile_assert(InvalidRoot, lookup_fault_invalid_root + 1 == seL4_InvalidRoot)
@@ -29,7 +27,7 @@ compile_assert(seL4_UserException_Number, (word_t) n_exceptionMessage == seL4_Us
 compile_assert(seL4_UserException_Code, (word_t) n_exceptionMessage + 1 == seL4_UserException_Code)
 
 static inline unsigned int
-setMRs_lookup_failure(tcb_t *receiver, word_t* receiveIPCBuffer,
+setMRs_lookup_failure(tcb_t *receiver, word_t *receiveIPCBuffer,
                       lookup_fault_t luf, unsigned int offset)
 {
     word_t lufType = lookup_fault_get_lufType(luf);
@@ -74,8 +72,7 @@ setMRs_lookup_failure(tcb_t *receiver, word_t* receiveIPCBuffer,
     }
 }
 
-static inline void
-copyMRsFaultReply(tcb_t *sender, tcb_t *receiver, MessageID_t id, word_t length)
+static inline void copyMRsFaultReply(tcb_t *sender, tcb_t *receiver, MessageID_t id, word_t length)
 {
     word_t i;
     bool_t archInfo;
@@ -100,9 +97,8 @@ copyMRsFaultReply(tcb_t *sender, tcb_t *receiver, MessageID_t id, word_t length)
     }
 }
 
-static inline void
-copyMRsFault(tcb_t *sender, tcb_t *receiver, MessageID_t id,
-             word_t length, word_t *receiveIPCBuffer)
+static inline void copyMRsFault(tcb_t *sender, tcb_t *receiver, MessageID_t id,
+                                word_t length, word_t *receiveIPCBuffer)
 {
     word_t i;
     for (i = 0; i < MIN(length, n_msgRegisters); i++) {
@@ -116,8 +112,7 @@ copyMRsFault(tcb_t *sender, tcb_t *receiver, MessageID_t id,
     }
 }
 
-bool_t
-handleFaultReply(tcb_t *receiver, tcb_t *sender)
+bool_t handleFaultReply(tcb_t *receiver, tcb_t *sender)
 {
     /* These lookups are moved inward from doReplyTransfer */
     seL4_MessageInfo_t tag = messageInfoFromWord(getRegister(sender, msgInfoRegister));
@@ -137,6 +132,11 @@ handleFaultReply(tcb_t *receiver, tcb_t *sender)
         copyMRsFaultReply(sender, receiver, MessageID_Exception, MIN(length, n_exceptionMessage));
         return (label == 0);
 
+#ifdef CONFIG_KERNEL_MCS
+    case seL4_Fault_Timeout:
+        copyMRsFaultReply(sender, receiver, MessageID_TimeoutReply, MIN(length, n_timeoutMessage));
+        return (label == 0);
+#endif
 #ifdef CONFIG_HARDWARE_DEBUG_API
     case seL4_Fault_DebugException: {
         word_t n_instrs;
@@ -189,8 +189,7 @@ handleFaultReply(tcb_t *receiver, tcb_t *sender)
     }
 }
 
-word_t
-setMRs_fault(tcb_t *sender, tcb_t* receiver, word_t *receiveIPCBuffer)
+word_t setMRs_fault(tcb_t *sender, tcb_t *receiver, word_t *receiveIPCBuffer)
 {
     switch (seL4_Fault_get_seL4_FaultType(sender->tcbFault)) {
     case seL4_Fault_CapFault:
@@ -219,6 +218,19 @@ setMRs_fault(tcb_t *sender, tcb_t* receiver, word_t *receiveIPCBuffer)
                      seL4_Fault_UserException_get_code(sender->tcbFault));
     }
 
+#ifdef CONFIG_KERNEL_MCS
+    case seL4_Fault_Timeout: {
+        word_t len = setMR(receiver, receiveIPCBuffer, seL4_Timeout_Data,
+                           seL4_Fault_Timeout_get_badge(sender->tcbFault));
+        if (sender->tcbSchedContext) {
+            time_t consumed = schedContext_updateConsumed(sender->tcbSchedContext);
+            return mode_setTimeArg(len, consumed,
+                                   receiveIPCBuffer, receiver);
+        } else {
+            return len;
+        }
+    }
+#endif
 #ifdef CONFIG_HARDWARE_DEBUG_API
     case seL4_Fault_DebugException: {
         word_t reason = seL4_Fault_DebugException_get_exceptionReason(sender->tcbFault);
@@ -247,20 +259,17 @@ setMRs_fault(tcb_t *sender, tcb_t* receiver, word_t *receiveIPCBuffer)
                                  seL4_Fault_get_seL4_FaultType(sender->tcbFault));
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/api/syscall.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
+#include <config.h>
 #include <types.h>
 #include <benchmark/benchmark.h>
-#include <arch/x86/arch/benchmark.h>
+#include <arch/benchmark.h>
 #include <benchmark/benchmark_track.h>
 #include <benchmark/benchmark_utilisation.h>
 #include <api/syscall.h>
@@ -271,13 +280,15 @@ setMRs_fault(tcb_t *sender, tcb_t* receiver, word_t *receiveIPCBuffer)
 #include <kernel/thread.h>
 #include <kernel/vspace.h>
 #include <machine/io.h>
-#include <plat/pc99/plat/machine/hardware.h>
+#include <plat/machine/hardware.h>
 #include <object/interrupt.h>
 #include <model/statedata.h>
 #include <string.h>
 #include <kernel/traps.h>
-#include <arch/x86/arch/machine.h>
-
+#include <arch/machine.h>
+#ifdef ENABLE_SMP_SUPPORT
+#include <smp/ipi.h>
+#endif
 #ifdef CONFIG_DEBUG_BUILD
 #include <arch/machine/capdl.h>
 #endif
@@ -285,16 +296,20 @@ setMRs_fault(tcb_t *sender, tcb_t* receiver, word_t *receiveIPCBuffer)
 /* The haskell function 'handleEvent' is split into 'handleXXX' variants
  * for each event causing a kernel entry */
 
-exception_t
-handleInterruptEntry(void)
+exception_t handleInterruptEntry(void)
 {
     irq_t irq;
 
-    irq = getActiveIRQ();
+#ifdef CONFIG_KERNEL_MCS
+    if (SMP_TERNARY(clh_is_self_in_queue(), 1)) {
+        updateTimestamp();
+        checkBudget();
+    }
+#endif
 
-    if (irq != irqInvalid) {
+    irq = getActiveIRQ();
+    if (IRQT_TO_IRQ(irq) != IRQT_TO_IRQ(irqInvalid)) {
         handleInterrupt(irq);
-        Arch_finaliseInterrupt();
     } else {
 #ifdef CONFIG_IRQ_REPORTING
         userError("Spurious interrupt!");
@@ -302,14 +317,19 @@ handleInterruptEntry(void)
         handleSpuriousIRQ();
     }
 
-    schedule();
-    activateThread();
+#ifdef CONFIG_KERNEL_MCS
+    if (SMP_TERNARY(clh_is_self_in_queue(), 1)) {
+#endif
+        schedule();
+        activateThread();
+#ifdef CONFIG_KERNEL_MCS
+    }
+#endif
 
     return EXCEPTION_NONE;
 }
 
-exception_t
-handleUnknownSyscall(word_t w)
+exception_t handleUnknownSyscall(word_t w)
 {
 #ifdef CONFIG_PRINTING
     if (w == SysDebugPutChar) {
@@ -325,14 +345,15 @@ handleUnknownSyscall(word_t w)
 #endif
 #ifdef CONFIG_DEBUG_BUILD
     if (w == SysDebugHalt) {
-        tcb_t * UNUSED tptr = NODE_STATE(ksCurThread);
-        printf("Debug halt syscall from user thread %p \"%s\"\n", tptr, tptr->tcbName);
+        tcb_t *UNUSED tptr = NODE_STATE(ksCurThread);
+        printf("Debug halt syscall from user thread %p \"%s\"\n", tptr, TCB_PTR_DEBUG_PTR(tptr)->tcbName);
         halt();
     }
     if (w == SysDebugSnapshot) {
-        tcb_t * UNUSED tptr = NODE_STATE(ksCurThread);
-        printf("Debug snapshot syscall from user thread %p \"%s\"\n", tptr, tptr->tcbName);
-        capDL();
+        tcb_t *UNUSED tptr = NODE_STATE(ksCurThread);
+        printf("Debug snapshot syscall from user thread %p \"%s\"\n",
+               tptr, TCB_PTR_DEBUG_PTR(tptr)->tcbName);
+        debug_capDL();
         return EXCEPTION_NONE;
     }
     if (w == SysDebugCapIdentify) {
@@ -357,7 +378,7 @@ handleUnknownSyscall(word_t w)
             halt();
         }
         /* Add 1 to the IPC buffer to skip the message info word */
-        name = (const char*)(lookupIPCBuffer(true, NODE_STATE(ksCurThread)) + 1);
+        name = (const char *)(lookupIPCBuffer(true, NODE_STATE(ksCurThread)) + 1);
         if (!name) {
             userError("SysDebugNameThread: Failed to lookup IPC buffer, halting");
             halt();
@@ -371,11 +392,17 @@ handleUnknownSyscall(word_t w)
         setThreadName(TCB_PTR(cap_thread_cap_get_capTCBPtr(lu_ret.cap)), name);
         return EXCEPTION_NONE;
     }
+#ifdef ENABLE_SMP_SUPPORT
+    if (w == SysDebugSendIPI) {
+        return handle_SysDebugSendIPI();
+    }
+#endif /* ENABLE_SMP_SUPPORT */
 #endif /* CONFIG_DEBUG_BUILD */
 
 #ifdef CONFIG_DANGEROUS_CODE_INJECTION
     if (w == SysDebugRun) {
-        ((void (*) (void *))getRegister(NODE_STATE(ksCurThread), capRegister))((void*)getRegister(NODE_STATE(ksCurThread), msgInfoRegister));
+        ((void (*)(void *))getRegister(NODE_STATE(ksCurThread), capRegister))((void *)getRegister(NODE_STATE(ksCurThread),
+                                                                                                  msgInfoRegister));
         return EXCEPTION_NONE;
     }
 #endif
@@ -409,97 +436,52 @@ handleUnknownSyscall(word_t w)
 #endif
 
 #ifdef CONFIG_ENABLE_BENCHMARKS
-    if (w == SysBenchmarkFlushCaches) {
-        arch_clean_invalidate_caches();
-        return EXCEPTION_NONE;
-    } else if (w == SysBenchmarkResetLog) {
-#ifdef CONFIG_BENCHMARK_USE_KERNEL_LOG_BUFFER
-        if (ksUserLogBuffer == 0) {
-            userError("A user-level buffer has to be set before resetting benchmark.\
-                    Use seL4_BenchmarkSetLogBuffer\n");
-            setRegister(NODE_STATE(ksCurThread), capRegister, seL4_IllegalOperation);
-            return EXCEPTION_SYSCALL_ERROR;
-        }
-
-        ksLogIndex = 0;
-#endif /* CONFIG_BENCHMARK_USE_KERNEL_LOG_BUFFER */
+    switch (w) {
+    case SysBenchmarkFlushCaches:
+        return handle_SysBenchmarkFlushCaches();
+    case SysBenchmarkResetLog:
+        return handle_SysBenchmarkResetLog();
+    case SysBenchmarkFinalizeLog:
+        return handle_SysBenchmarkFinalizeLog();
+#ifdef CONFIG_KERNEL_LOG_BUFFER
+    case SysBenchmarkSetLogBuffer:
+        return handle_SysBenchmarkSetLogBuffer();
+#endif /* CONFIG_KERNEL_LOG_BUFFER */
 #ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
-        benchmark_log_utilisation_enabled = true;
-        NODE_STATE(ksIdleThread)->benchmark.utilisation = 0;
-        NODE_STATE(ksCurThread)->benchmark.schedule_start_time = ksEnter;
-        benchmark_start_time = ksEnter;
-        benchmark_arch_utilisation_reset();
+    case SysBenchmarkGetThreadUtilisation:
+        return handle_SysBenchmarkGetThreadUtilisation();
+    case SysBenchmarkResetThreadUtilisation:
+        return handle_SysBenchmarkResetThreadUtilisation();
+#ifdef CONFIG_DEBUG_BUILD
+    case SysBenchmarkDumpAllThreadsUtilisation:
+        return handle_SysBenchmarkDumpAllThreadsUtilisation();
+    case SysBenchmarkResetAllThreadsUtilisation:
+        return handle_SysBenchmarkResetAllThreadsUtilisation();
+#endif /* CONFIG_DEBUG_BUILD */
 #endif /* CONFIG_BENCHMARK_TRACK_UTILISATION */
-        setRegister(NODE_STATE(ksCurThread), capRegister, seL4_NoError);
+    case SysBenchmarkNullSyscall:
         return EXCEPTION_NONE;
-    } else if (w == SysBenchmarkFinalizeLog) {
-#ifdef CONFIG_BENCHMARK_USE_KERNEL_LOG_BUFFER
-        ksLogIndexFinalized = ksLogIndex;
-        setRegister(NODE_STATE(ksCurThread), capRegister, ksLogIndexFinalized);
-#endif /* CONFIG_BENCHMARK_USE_KERNEL_LOG_BUFFER */
-#ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
-        benchmark_utilisation_finalise();
-#endif /* CONFIG_BENCHMARK_TRACK_UTILISATION */
-        return EXCEPTION_NONE;
-    } else if (w == SysBenchmarkSetLogBuffer) {
-#ifdef CONFIG_BENCHMARK_USE_KERNEL_LOG_BUFFER
-        word_t cptr_userFrame = getRegister(NODE_STATE(ksCurThread), capRegister);
-
-        if (benchmark_arch_map_logBuffer(cptr_userFrame) != EXCEPTION_NONE) {
-            setRegister(NODE_STATE(ksCurThread), capRegister, seL4_IllegalOperation);
-            return EXCEPTION_SYSCALL_ERROR;
-        }
-
-        setRegister(NODE_STATE(ksCurThread), capRegister, seL4_NoError);
-        return EXCEPTION_NONE;
-#endif /* CONFIG_BENCHMARK_USE_KERNEL_LOG_BUFFER */
-    }
-
-#ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
-    else if (w == SysBenchmarkGetThreadUtilisation) {
-        benchmark_track_utilisation_dump();
-        return EXCEPTION_NONE;
-    } else if (w == SysBenchmarkResetThreadUtilisation) {
-        benchmark_track_reset_utilisation();
-        return EXCEPTION_NONE;
-    }
-#endif /* CONFIG_BENCHMARK_TRACK_UTILISATION */
-
-    else if (w == SysBenchmarkNullSyscall) {
-        return EXCEPTION_NONE;
-    }
+    default:
+        break; /* syscall is not for benchmarking */
+    } /* end switch(w) */
 #endif /* CONFIG_ENABLE_BENCHMARKS */
 
-    current_fault = seL4_Fault_UnknownSyscall_new(w);
-    handleFault(NODE_STATE(ksCurThread));
-
-    schedule();
-    activateThread();
-
-    return EXCEPTION_NONE;
-}
-
-exception_t
-handleUserLevelFault(word_t w_a, word_t w_b)
-{
-    current_fault = seL4_Fault_UserException_new(w_a, w_b);
-    handleFault(NODE_STATE(ksCurThread));
-
-    schedule();
-    activateThread();
-
-    return EXCEPTION_NONE;
-}
-
-exception_t
-handleVMFaultEvent(vm_fault_type_t vm_faultType)
-{
-    exception_t status;
-
-    status = handleVMFault(NODE_STATE(ksCurThread), vm_faultType);
-    if (status != EXCEPTION_NONE) {
+    MCS_DO_IF_BUDGET({
+#ifdef CONFIG_SET_TLS_BASE_SELF
+        if (w == SysSetTLSBase)
+        {
+            word_t tls_base = getRegister(NODE_STATE(ksCurThread), capRegister);
+            /*
+             * This updates the real register as opposed to the thread state
+             * value. For many architectures, the TLS variables only get
+             * updated on a thread switch.
+             */
+            return Arch_setTLSRegister(tls_base);
+        }
+#endif
+        current_fault = seL4_Fault_UnknownSyscall_new(w);
         handleFault(NODE_STATE(ksCurThread));
-    }
+    })
 
     schedule();
     activateThread();
@@ -507,12 +489,42 @@ handleVMFaultEvent(vm_fault_type_t vm_faultType)
     return EXCEPTION_NONE;
 }
 
+exception_t handleUserLevelFault(word_t w_a, word_t w_b)
+{
+    MCS_DO_IF_BUDGET({
+        current_fault = seL4_Fault_UserException_new(w_a, w_b);
+        handleFault(NODE_STATE(ksCurThread));
+    })
+    schedule();
+    activateThread();
 
-static exception_t
-handleInvocation(bool_t isCall, bool_t isBlocking)
+    return EXCEPTION_NONE;
+}
+
+exception_t handleVMFaultEvent(vm_fault_type_t vm_faultType)
+{
+    MCS_DO_IF_BUDGET({
+
+        exception_t status = handleVMFault(NODE_STATE(ksCurThread), vm_faultType);
+        if (status != EXCEPTION_NONE)
+        {
+            handleFault(NODE_STATE(ksCurThread));
+        }
+    })
+
+    schedule();
+    activateThread();
+
+    return EXCEPTION_NONE;
+}
+
+#ifdef CONFIG_KERNEL_MCS
+static exception_t handleInvocation(bool_t isCall, bool_t isBlocking, bool_t canDonate, bool_t firstPhase, cptr_t cptr)
+#else
+static exception_t handleInvocation(bool_t isCall, bool_t isBlocking)
+#endif
 {
     seL4_MessageInfo_t info;
-    cptr_t cptr;
     lookupCapAndSlot_ret_t lu_ret;
     word_t *buffer;
     exception_t status;
@@ -522,7 +534,9 @@ handleInvocation(bool_t isCall, bool_t isBlocking)
     thread = NODE_STATE(ksCurThread);
 
     info = messageInfoFromWord(getRegister(thread, msgInfoRegister));
-    cptr = getRegister(thread, capRegister);
+#ifndef CONFIG_KERNEL_MCS
+    cptr_t cptr = getRegister(thread, capRegister);
+#endif
 
     /* faulting section */
     lu_ret = lookupCapAndSlot(thread, cptr);
@@ -555,10 +569,16 @@ handleInvocation(bool_t isCall, bool_t isBlocking)
     if (unlikely(length > n_msgRegisters && !buffer)) {
         length = n_msgRegisters;
     }
+#ifdef CONFIG_KERNEL_MCS
     status = decodeInvocation(seL4_MessageInfo_get_label(info), length,
                               cptr, lu_ret.slot, lu_ret.cap,
-                              current_extra_caps, isBlocking, isCall,
-                              buffer);
+                              isBlocking, isCall,
+                              canDonate, firstPhase, buffer);
+#else
+    status = decodeInvocation(seL4_MessageInfo_get_label(info), length,
+                              cptr, lu_ret.slot, lu_ret.cap,
+                              isBlocking, isCall, buffer);
+#endif
 
     if (unlikely(status == EXCEPTION_PREEMPTED)) {
         return status;
@@ -572,7 +592,7 @@ handleInvocation(bool_t isCall, bool_t isBlocking)
     }
 
     if (unlikely(
-                thread_state_get_tsType(thread->tcbState) == ThreadState_Restart)) {
+            thread_state_get_tsType(thread->tcbState) == ThreadState_Restart)) {
         if (isCall) {
             replyFromKernel_success_empty(thread);
         }
@@ -582,8 +602,30 @@ handleInvocation(bool_t isCall, bool_t isBlocking)
     return EXCEPTION_NONE;
 }
 
-static void
-handleReply(void)
+#ifdef CONFIG_KERNEL_MCS
+static inline lookupCap_ret_t lookupReply(void)
+{
+    word_t replyCPtr = getRegister(NODE_STATE(ksCurThread), replyRegister);
+    lookupCap_ret_t lu_ret = lookupCap(NODE_STATE(ksCurThread), replyCPtr);
+    if (unlikely(lu_ret.status != EXCEPTION_NONE)) {
+        userError("Reply cap lookup failed");
+        current_fault = seL4_Fault_CapFault_new(replyCPtr, true);
+        handleFault(NODE_STATE(ksCurThread));
+        return lu_ret;
+    }
+
+    if (unlikely(cap_get_capType(lu_ret.cap) != cap_reply_cap)) {
+        userError("Cap in reply slot is not a reply");
+        current_fault = seL4_Fault_CapFault_new(replyCPtr, true);
+        handleFault(NODE_STATE(ksCurThread));
+        lu_ret.status = EXCEPTION_FAULT;
+        return lu_ret;
+    }
+
+    return lu_ret;
+}
+#else
+static void handleReply(void)
 {
     cte_t *callerSlot;
     cap_t callerCap;
@@ -602,12 +644,13 @@ handleReply(void)
         /* Haskell error:
          * "handleReply: caller must not be the current thread" */
         assert(caller != NODE_STATE(ksCurThread));
-        doReplyTransfer(NODE_STATE(ksCurThread), caller, callerSlot);
+        doReplyTransfer(NODE_STATE(ksCurThread), caller, callerSlot,
+                        cap_reply_cap_get_capReplyCanGrant(callerCap));
         return;
     }
 
     case cap_null_cap:
-        userError("Attempted reply operation when no reply cap present.");
+        /* Do nothing when no caller is pending */
         return;
 
     default:
@@ -616,9 +659,13 @@ handleReply(void)
 
     fail("handleReply: invalid caller cap");
 }
+#endif
 
-static void
-handleRecv(bool_t isBlocking)
+#ifdef CONFIG_KERNEL_MCS
+static void handleRecv(bool_t isBlocking, bool_t canReply)
+#else
+static void handleRecv(bool_t isBlocking)
+#endif
 {
     word_t epCPtr;
     lookupCap_ret_t lu_ret;
@@ -643,15 +690,29 @@ handleRecv(bool_t isBlocking)
             break;
         }
 
+#ifdef CONFIG_KERNEL_MCS
+        cap_t ep_cap = lu_ret.cap;
+        cap_t reply_cap = cap_null_cap_new();
+        if (canReply) {
+            lu_ret = lookupReply();
+            if (lu_ret.status != EXCEPTION_NONE) {
+                return;
+            } else {
+                reply_cap = lu_ret.cap;
+            }
+        }
+        receiveIPC(NODE_STATE(ksCurThread), ep_cap, isBlocking, reply_cap);
+#else
         deleteCallerCap(NODE_STATE(ksCurThread));
         receiveIPC(NODE_STATE(ksCurThread), lu_ret.cap, isBlocking);
+#endif
         break;
 
     case cap_notification_cap: {
         notification_t *ntfnPtr;
         tcb_t *boundTCB;
         ntfnPtr = NTFN_PTR(cap_notification_cap_get_capNtfnPtr(lu_ret.cap));
-        boundTCB = (tcb_t*)notification_ptr_get_ntfnBoundTCB(ntfnPtr);
+        boundTCB = (tcb_t *)notification_ptr_get_ntfnBoundTCB(ntfnPtr);
         if (unlikely(!cap_notification_cap_get_capNtfnCanReceive(lu_ret.cap)
                      || (boundTCB && boundTCB != NODE_STATE(ksCurThread)))) {
             current_lookup_fault = lookup_fault_missing_capability_new(0);
@@ -671,102 +732,177 @@ handleRecv(bool_t isBlocking)
     }
 }
 
-static void
-handleYield(void)
+#ifdef CONFIG_KERNEL_MCS
+static inline void mcsPreemptionPoint(void)
 {
+    /* at this point we could be handling a timer interrupt which actually ends the current
+     * threads timeslice. However, preemption is possible on revoke, which could have deleted
+     * the current thread and/or the current scheduling context, rendering them invalid. */
+    if (isSchedulable(NODE_STATE(ksCurThread))) {
+        /* if the thread is schedulable, the tcb and scheduling context are still valid */
+        checkBudget();
+    } else if (NODE_STATE(ksCurSC)->scRefillMax) {
+        /* otherwise, if the thread is not schedulable, the SC could be valid - charge it if so */
+        chargeBudget(NODE_STATE(ksConsumed), false);
+    } else {
+        /* If the current SC is no longer configured the time can no
+         * longer be charged to it. Simply dropping the consumed time
+         * here is equivalent to having charged the consumed time and
+         * then having cleared the SC. */
+        NODE_STATE(ksConsumed) = 0;
+    }
+}
+#else
+#define handleRecv(isBlocking, canReply) handleRecv(isBlocking)
+#define mcsPreemptionPoint()
+#define handleInvocation(isCall, isBlocking, canDonate, firstPhase, cptr) handleInvocation(isCall, isBlocking)
+#endif
+
+static void handleYield(void)
+{
+#ifdef CONFIG_KERNEL_MCS
+    /* Yield the current remaining budget */
+    ticks_t consumed = NODE_STATE(ksCurSC)->scConsumed + NODE_STATE(ksConsumed);
+    chargeBudget(refill_head(NODE_STATE(ksCurSC))->rAmount, false);
+    /* Manually updated the scConsumed so that the full timeslice isn't added, just what was consumed */
+    NODE_STATE(ksCurSC)->scConsumed = consumed;
+#else
     tcbSchedDequeue(NODE_STATE(ksCurThread));
     SCHED_APPEND_CURRENT_TCB;
     rescheduleRequired();
+#endif
 }
 
-exception_t
-handleSyscall(syscall_t syscall)
+exception_t handleSyscall(syscall_t syscall)
 {
     exception_t ret;
     irq_t irq;
-
-    switch (syscall) {
-    case SysSend:
-        ret = handleInvocation(false, true);
-        if (unlikely(ret != EXCEPTION_NONE)) {
-            irq = getActiveIRQ();
-            if (irq != irqInvalid) {
-                handleInterrupt(irq);
-                Arch_finaliseInterrupt();
+    MCS_DO_IF_BUDGET({
+        switch (syscall)
+        {
+        case SysSend:
+            ret = handleInvocation(false, true, false, false, getRegister(NODE_STATE(ksCurThread), capRegister));
+            if (unlikely(ret != EXCEPTION_NONE)) {
+                mcsPreemptionPoint();
+                irq = getActiveIRQ();
+                if (IRQT_TO_IRQ(irq) != IRQT_TO_IRQ(irqInvalid)) {
+                    handleInterrupt(irq);
+                }
             }
-        }
-        break;
 
-    case SysNBSend:
-        ret = handleInvocation(false, false);
-        if (unlikely(ret != EXCEPTION_NONE)) {
-            irq = getActiveIRQ();
-            if (irq != irqInvalid) {
-                handleInterrupt(irq);
-                Arch_finaliseInterrupt();
+            break;
+
+        case SysNBSend:
+            ret = handleInvocation(false, false, false, false, getRegister(NODE_STATE(ksCurThread), capRegister));
+            if (unlikely(ret != EXCEPTION_NONE)) {
+                mcsPreemptionPoint();
+                irq = getActiveIRQ();
+                if (IRQT_TO_IRQ(irq) != IRQT_TO_IRQ(irqInvalid)) {
+                    handleInterrupt(irq);
+                }
             }
-        }
-        break;
+            break;
 
-    case SysCall:
-        ret = handleInvocation(true, true);
-        if (unlikely(ret != EXCEPTION_NONE)) {
-            irq = getActiveIRQ();
-            if (irq != irqInvalid) {
-                handleInterrupt(irq);
-                Arch_finaliseInterrupt();
+        case SysCall:
+            ret = handleInvocation(true, true, true, false, getRegister(NODE_STATE(ksCurThread), capRegister));
+            if (unlikely(ret != EXCEPTION_NONE)) {
+                mcsPreemptionPoint();
+                irq = getActiveIRQ();
+                if (IRQT_TO_IRQ(irq) != IRQT_TO_IRQ(irqInvalid)) {
+                    handleInterrupt(irq);
+                }
             }
+            break;
+
+        case SysRecv:
+            handleRecv(true, true);
+            break;
+#ifndef CONFIG_KERNEL_MCS
+        case SysReply:
+            handleReply();
+            break;
+
+        case SysReplyRecv:
+            handleReply();
+            handleRecv(true, true);
+            break;
+
+#else /* CONFIG_KERNEL_MCS */
+        case SysWait:
+            handleRecv(true, false);
+            break;
+
+        case SysNBWait:
+            handleRecv(false, false);
+            break;
+        case SysReplyRecv: {
+            cptr_t reply = getRegister(NODE_STATE(ksCurThread), replyRegister);
+            ret = handleInvocation(false, false, true, true, reply);
+            /* reply cannot error and is not preemptible */
+            assert(ret == EXCEPTION_NONE);
+            handleRecv(true, true);
+            break;
         }
-        break;
 
-    case SysRecv:
-        handleRecv(true);
-        break;
+        case SysNBSendRecv: {
+            cptr_t dest = getNBSendRecvDest();
+            ret = handleInvocation(false, false, true, true, dest);
+            if (unlikely(ret != EXCEPTION_NONE)) {
+                mcsPreemptionPoint();
+                irq = getActiveIRQ();
+                if (IRQT_TO_IRQ(irq) != IRQT_TO_IRQ(irqInvalid)) {
+                    handleInterrupt(irq);
+                }
+                break;
+            }
+            handleRecv(true, true);
+            break;
+        }
 
-    case SysReply:
-        handleReply();
-        break;
+        case SysNBSendWait:
+            ret = handleInvocation(false, false, true, true, getRegister(NODE_STATE(ksCurThread), replyRegister));
+            if (unlikely(ret != EXCEPTION_NONE)) {
+                mcsPreemptionPoint();
+                irq = getActiveIRQ();
+                if (IRQT_TO_IRQ(irq) != IRQT_TO_IRQ(irqInvalid)) {
+                    handleInterrupt(irq);
+                }
+                break;
+            }
+            handleRecv(true, false);
+            break;
+#endif
+        case SysNBRecv:
+            handleRecv(false, true);
+            break;
 
-    case SysReplyRecv:
-        handleReply();
-        handleRecv(true);
-        break;
+        case SysYield:
+            handleYield();
+            break;
 
-    case SysNBRecv:
-        handleRecv(false);
-        break;
+        default:
+            fail("Invalid syscall");
+        }
 
-    case SysYield:
-        handleYield();
-        break;
-
-    default:
-        fail("Invalid syscall");
-    }
+    })
 
     schedule();
     activateThread();
 
     return EXCEPTION_NONE;
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/64/c_traps.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 #include <model/statedata.h>
 #include <machine/fpu.h>
 #include <kernel/traps.h>
-#include <arch/x86/arch/machine/debug.h>
+#include <arch/machine/debug.h>
 #include <kernel/stack.h>
 
 #include <api/syscall.h>
@@ -825,11 +961,11 @@ static void NORETURN restore_vmx(void)
 #else
             "leaq kernel_stack_alloc + %c[stack_size], %%rsp\n"
 #endif
-            "leaq %[failed], %%rax\n"
+            "movq %[failed], %%rax\n"
             "jmp *%%rax\n"
             :
             : [reg]"r"(&cur_thread->tcbArch.tcbVCPU->gp_registers[VCPU_EAX]),
-            [failed]"m"(vmlaunch_failed),
+            [failed]"i"(&vmlaunch_failed),
             [stack_size]"i"(BIT(CONFIG_KERNEL_STACK_BITS))
 #ifdef ENABLE_SMP_SUPPORT
             , [stack_offset]"i"(OFFSETOF(nodeInfo_t, stackTop))
@@ -866,11 +1002,11 @@ static void NORETURN restore_vmx(void)
 #else
             "leaq kernel_stack_alloc + %c[stack_size], %%rsp\n"
 #endif
-            "leaq %[failed], %%rax\n"
+            "movq %[failed], %%rax\n"
             "jmp *%%rax\n"
             :
             : [reg]"r"(&cur_thread->tcbArch.tcbVCPU->gp_registers[VCPU_EAX]),
-            [failed]"m"(vmlaunch_failed),
+            [failed]"i"(&vmlaunch_failed),
             [stack_size]"i"(BIT(CONFIG_KERNEL_STACK_BITS))
 #ifdef ENABLE_SMP_SUPPORT
             , [stack_offset]"i"(OFFSETOF(nodeInfo_t, stackTop))
@@ -921,22 +1057,11 @@ void VISIBLE NORETURN restore_user_context(void)
 #endif
 
 #ifdef ENABLE_SMP_SUPPORT
-    cpu_id_t cpu = getCurrentCPUIndex();
 #ifdef CONFIG_KERNEL_SKIM_WINDOW
     word_t user_cr3 = MODE_NODE_STATE(x64KSCurrentUserCR3);
 #endif /* CONFIG_KERNEL_SKIM_WINDOW */
     swapgs();
 #endif /* ENABLE_SMP_SUPPORT */
-
-    /* Now that we have swapped back to the user gs we can safely
-     * update the GS base. We must *not* use any kernel functions
-     * that rely on having a kernel GS though. Most notably uses
-     * of NODE_STATE etc cannot be used beyond this point */
-    word_t base = getRegister(cur_thread, TLS_BASE);
-    x86_write_fs_base(base, SMP_TERNARY(cpu, 0));
-
-    base = cur_thread->tcbIPCBuffer;
-    x86_write_gs_base(base, SMP_TERNARY(cpu, 0));
 
     if (config_set(CONFIG_KERNEL_X86_IBRS_BASIC)) {
         x86_disable_ibrs();
@@ -946,7 +1071,8 @@ void VISIBLE NORETURN restore_user_context(void)
     // There is a special case where if we would be returning from a sysenter,
     // but are current singlestepping, do a full return like an interrupt
     if (likely(cur_thread->tcbArch.tcbContext.registers[Error] == -1) &&
-            (!config_set(CONFIG_SYSENTER) || !config_set(CONFIG_HARDWARE_DEBUG_API) || ((cur_thread->tcbArch.tcbContext.registers[FLAGS] & FLAGS_TF) == 0))) {
+        (!config_set(CONFIG_SYSENTER) || !config_set(CONFIG_HARDWARE_DEBUG_API)
+         || ((cur_thread->tcbArch.tcbContext.registers[FLAGS] & FLAGS_TF) == 0))) {
         if (config_set(CONFIG_KERNEL_SKIM_WINDOW)) {
             /* if we are using the SKIM window then we are trying to hide kernel state from
              * the user in the case of Meltdown where the kernel region is effectively readable
@@ -995,8 +1121,8 @@ void VISIBLE NORETURN restore_user_context(void)
                 "addq $8, %%rsp\n"
                 // Restore RSP
                 "popq %%rcx\n"
-                // Skip TLS_BASE, FaultIP
-                "addq $16, %%rsp\n"
+                // Skip FaultIP
+                "addq $8, %%rsp\n"
 #if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_KERNEL_SKIM_WINDOW)
                 "popq %%rsp\n"
                 "movq %%r11, %%cr3\n"
@@ -1011,17 +1137,13 @@ void VISIBLE NORETURN restore_user_context(void)
                 // More register but we can ignore and are done restoring
                 // enable interrupt disabled by sysenter
                 "sti\n"
-                /* return to user
-                 * sysexit with rex.w user code = cs + 32, user data = cs + 40.
-                 * without rex.w user code = cs + 16, user data = cs + 24
-                 * */
-                "rex.w sysexit\n"
+                SYSEXITQ "\n"
                 :
                 : "r"(&cur_thread->tcbArch.tcbContext.registers[RDI]),
 #if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_KERNEL_SKIM_WINDOW)
                 "r"(user_cr3_r11),
 #endif
-                [IF] "i" (FLAGS_IF)
+                [IF] "i"(FLAGS_IF)
                 // Clobber memory so the compiler is forced to complete all stores
                 // before running this assembler
                 : "memory"
@@ -1061,11 +1183,11 @@ void VISIBLE NORETURN restore_user_context(void)
                 "xor %%rsp, %%rsp\n"
                 // More register but we can ignore and are done restoring
                 // enable interrupt disabled by sysenter
-                "rex.w sysret\n"
+                "sysretq\n"
                 :
                 : "r"(&cur_thread->tcbArch.tcbContext.registers[RDI])
 #if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_KERNEL_SKIM_WINDOW)
-                , "c" (user_cr3)
+                , "c"(user_cr3)
 #endif
                 // Clobber memory so the compiler is forced to complete all stores
                 // before running this assembler
@@ -1099,8 +1221,8 @@ void VISIBLE NORETURN restore_user_context(void)
             "popq %%r8\n"
             "popq %%r9\n"
             "popq %%r15\n"
-            /* skip RFLAGS, Error NextIP RSP, TLS_BASE, FaultIP */
-            "addq $48, %%rsp\n"
+            /* skip RFLAGS, Error, NextIP, RSP, and FaultIP */
+            "addq $40, %%rsp\n"
             "popq %%r11\n"
 
 #if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_KERNEL_SKIM_WINDOW)
@@ -1141,8 +1263,8 @@ void VISIBLE NORETURN restore_user_context(void)
             :
             : "r"(&cur_thread->tcbArch.tcbContext.registers[RDI])
 #if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_KERNEL_SKIM_WINDOW)
-            , "c" (user_cr3)
-            , [scratch_offset] "i" (nodeSkimScratchOffset)
+            , "c"(user_cr3)
+            , [scratch_offset] "i"(nodeSkimScratchOffset)
 #endif
             // Clobber memory so the compiler is forced to complete all stores
             // before running this assembler
@@ -1171,24 +1293,17 @@ void VISIBLE NORETURN c_x64_handle_interrupt(int irq, int syscall)
     c_handle_interrupt(irq, syscall);
     UNREACHABLE();
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/64/kernel/elf.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
-#include <arch/x86/arch/kernel/elf.h>
+#include <arch/kernel/elf.h>
 #include <linker.h>
 
-BOOT_CODE bool_t
-elf_checkFile(Elf64_Header_t *elf)
+BOOT_CODE bool_t elf_checkFile(Elf64_Header_t *elf)
 {
     return (
                elf->e_ident[0] == '\177' &&
@@ -1200,8 +1315,7 @@ elf_checkFile(Elf64_Header_t *elf)
 }
 
 
-BOOT_CODE v_region_t
-elf_getMemoryBounds(Elf64_Header_t *elf)
+BOOT_CODE v_region_t elf_getMemoryBounds(Elf64_Header_t *elf)
 {
     v_region_t  elf_reg;
     vptr_t      sect_start;
@@ -1228,8 +1342,7 @@ elf_getMemoryBounds(Elf64_Header_t *elf)
     return elf_reg;
 }
 
-BOOT_CODE void
-elf_load(Elf64_Header_t *elf, seL4_Word offset)
+BOOT_CODE void elf_load(Elf64_Header_t *elf, seL4_Word offset)
 {
     paddr_t     src;
     paddr_t     dst;
@@ -1246,36 +1359,29 @@ elf_load(Elf64_Header_t *elf, seL4_Word offset)
         memset((void *)dst, 0, phdr[i].p_memsz - len);
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/64/kernel/thread.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <object.h>
 #include <machine.h>
-#include <arch/x86/arch/model/statedata.h>
-#include <arch/x86/arch/kernel/vspace.h>
-#include <arch/x86/arch/kernel/thread.h>
+#include <arch/model/statedata.h>
+#include <arch/kernel/vspace.h>
+#include <arch/kernel/thread.h>
 #include <linker.h>
 
-void
-Arch_switchToThread(tcb_t* tcb)
+void Arch_switchToThread(tcb_t *tcb)
 {
     /* set PD */
     setVMRoot(tcb);
 #ifdef ENABLE_SMP_SUPPORT
     asm volatile("movq %[value], %%gs:%c[offset]"
                  :
-                 : [value] "r" (&tcb->tcbArch.tcbContext.registers[Error + 1]),
-                 [offset] "i" (OFFSETOF(nodeInfo_t, currentThreadUserContext)));
+                 : [value] "r"(&tcb->tcbArch.tcbContext.registers[Error + 1]),
+                 [offset] "i"(OFFSETOF(nodeInfo_t, currentThreadUserContext)));
 #endif
     if (config_set(CONFIG_KERNEL_X86_IBPB_ON_CONTEXT_SWITCH)) {
         x86_ibpb();
@@ -1286,11 +1392,10 @@ Arch_switchToThread(tcb_t* tcb)
     }
 }
 
-BOOT_CODE void
-Arch_configureIdleThread(tcb_t* tcb)
+BOOT_CODE void Arch_configureIdleThread(tcb_t *tcb)
 {
     setRegister(tcb, FLAGS, FLAGS_USER_DEFAULT);
-    setRegister(tcb, NextIP, (uint64_t)idleThreadStart);
+    setRegister(tcb, NextIP, (word_t)&idle_thread);
     setRegister(tcb, CS, SEL_CS_0);
     setRegister(tcb, SS, SEL_DS_0);
     /* We set the RSP to 0, even though the idle thread will never touch it, as it
@@ -1301,8 +1406,7 @@ Arch_configureIdleThread(tcb_t* tcb)
     setRegister(tcb, RSP, 0);
 }
 
-void
-Arch_switchToIdleThread(void)
+void Arch_switchToIdleThread(void)
 {
     tcb_t *tcb = NODE_STATE(ksIdleThread);
     /* Force the idle thread to run on kernel page table */
@@ -1311,18 +1415,16 @@ Arch_switchToIdleThread(void)
     asm volatile("movq %[value], %%gs:%c[offset]"
                  :
                  : [value] "r"(&tcb->tcbArch.tcbContext.registers[Error + 1]),
-                 [offset] "i" (OFFSETOF(nodeInfo_t, currentThreadUserContext)));
+                 [offset] "i"(OFFSETOF(nodeInfo_t, currentThreadUserContext)));
 #endif
 }
 
-void
-Arch_activateIdleThread(tcb_t* tcb)
+void Arch_activateIdleThread(tcb_t *tcb)
 {
     /* Don't need to do anything */
 }
 
-void
-Mode_postModifyRegisters(tcb_t *tptr)
+void Mode_postModifyRegisters(tcb_t *tptr)
 {
     /* Setting Error to 0 will force a return by the interrupt path, which
      * does a full restore. Unless we're the current thread, in which case
@@ -1331,17 +1433,11 @@ Mode_postModifyRegisters(tcb_t *tptr)
         setRegister(tptr, Error, 0);
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/64/kernel/vspace.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -1349,11 +1445,13 @@ Mode_postModifyRegisters(tcb_t *tptr)
 #include <machine/io.h>
 #include <kernel/boot.h>
 #include <model/statedata.h>
-#include <arch/x86/arch/kernel/vspace.h>
-#include <arch/x86/arch/kernel/boot.h>
-#include <build/gen_headers/arch/api/invocation.h>
-#include <arch/x86/arch/64/mode/kernel/tlb.h>
-#include <arch/x86/arch/kernel/tlb_bitmap.h>
+#include <arch/kernel/vspace.h>
+#include <arch/kernel/boot.h>
+#include <arch/kernel/boot_sys.h>
+#include <arch/api/invocation.h>
+#include <mode/kernel/tlb.h>
+#include <arch/kernel/tlb_bitmap.h>
+#include <object/structures.h>
 
 /* When using the SKIM window to isolate the kernel from the user we also need to
  * not use global mappings as having global mappings and entries in the TLB is
@@ -1376,12 +1474,11 @@ pdpte_t boot_pdpt[BIT(PDPT_INDEX_BITS)] ALIGN(BIT(seL4_PageBits)) VISIBLE PHYS_B
  */
 gdt_idt_ptr_t gdt_idt_ptr;
 
-BOOT_CODE bool_t
-map_kernel_window(
+BOOT_CODE bool_t map_kernel_window(
     uint32_t num_ioapic,
-    paddr_t*   ioapic_paddrs,
+    paddr_t   *ioapic_paddrs,
     uint32_t   num_drhu,
-    paddr_t*   drhu_list
+    paddr_t   *drhu_list
 )
 {
 
@@ -1395,11 +1492,11 @@ map_kernel_window(
     assert(GET_PML4_INDEX(PPTR_BASE) == BIT(PML4_INDEX_BITS) - 1);
     /* verify that the kernel_base is located in the last entry of the PML4,
      * the second last entry of the PDPT, is 1gb aligned and 1gb in size */
-    assert(GET_PML4_INDEX(KERNEL_BASE) == BIT(PML4_INDEX_BITS) - 1);
-    assert(GET_PDPT_INDEX(KERNEL_BASE) == BIT(PML4_INDEX_BITS) - 2);
-    assert(GET_PDPT_INDEX(PPTR_KDEV) == BIT(PML4_INDEX_BITS) - 1);
-    assert(IS_ALIGNED(KERNEL_BASE, seL4_HugePageBits));
-    assert(IS_ALIGNED(PPTR_KDEV, seL4_HugePageBits));
+    assert(GET_PML4_INDEX(KERNEL_ELF_BASE) == BIT(PML4_INDEX_BITS) - 1);
+    assert(GET_PDPT_INDEX(KERNEL_ELF_BASE) == BIT(PML4_INDEX_BITS) - 2);
+    assert(GET_PDPT_INDEX(KDEV_BASE) == BIT(PML4_INDEX_BITS) - 1);
+    assert(IS_ALIGNED(KERNEL_ELF_BASE - KERNEL_ELF_PADDR_BASE, seL4_HugePageBits));
+    assert(IS_ALIGNED(KDEV_BASE, seL4_HugePageBits));
     /* place the PDPT into the PML4 */
     x64KSKernelPML4[GET_PML4_INDEX(PPTR_BASE)] = pml4e_new(
                                                      0, /* xd */
@@ -1412,24 +1509,24 @@ map_kernel_window(
                                                      1  /* present */
                                                  );
     /* put the 1GB kernel_base mapping into the PDPT */
-    x64KSKernelPDPT[GET_PDPT_INDEX(KERNEL_BASE)] = pdpte_pdpte_1g_new(
-                                                       0, /* xd */
-                                                       PADDR_BASE,
-                                                       0, /* PAT */
-                                                       KERNEL_IS_GLOBAL(), /* global */
-                                                       0, /* dirty */
-                                                       0, /* accessed */
-                                                       0, /* cache_disabled */
-                                                       0, /* write_through */
-                                                       0, /* super_user */
-                                                       1, /* read_write */
-                                                       1  /* present */
-                                                   );
+    x64KSKernelPDPT[GET_PDPT_INDEX(KERNEL_ELF_BASE)] = pdpte_pdpte_1g_new(
+                                                           0, /* xd */
+                                                           PADDR_BASE,
+                                                           0, /* PAT */
+                                                           KERNEL_IS_GLOBAL(), /* global */
+                                                           0, /* dirty */
+                                                           0, /* accessed */
+                                                           0, /* cache_disabled */
+                                                           0, /* write_through */
+                                                           0, /* super_user */
+                                                           1, /* read_write */
+                                                           1  /* present */
+                                                       );
     /* also map the physical memory into the big kernel window */
     paddr = 0;
     vaddr = PPTR_BASE;
     for (paddr = 0; paddr < PADDR_TOP;
-            paddr += BIT(seL4_HugePageBits)) {
+         paddr += BIT(seL4_HugePageBits)) {
 
         int pdpte_index = GET_PDPT_INDEX(vaddr);
         x64KSKernelPDPT[pdpte_index] = pdpte_pdpte_1g_new(
@@ -1450,7 +1547,7 @@ map_kernel_window(
     }
 
     /* put the PD into the PDPT */
-    x64KSKernelPDPT[GET_PDPT_INDEX(PPTR_KDEV)] = pdpte_pdpte_pd_new(
+    x64KSKernelPDPT[GET_PDPT_INDEX(KDEV_BASE)] = pdpte_pdpte_pd_new(
                                                      0, /* xd */
                                                      kpptr_to_paddr(x64KSKernelPD),
                                                      0, /* accessed */
@@ -1479,11 +1576,11 @@ map_kernel_window(
     assert(GET_PML4_INDEX(PPTR_BASE) == BIT(PML4_INDEX_BITS) - 1);
     /* verify that the kernel_base is located in the last entry of the PML4,
      * the second last entry of the PDPT, is 1gb aligned and 1gb in size */
-    assert(GET_PML4_INDEX(KERNEL_BASE) == BIT(PML4_INDEX_BITS) - 1);
-    assert(GET_PDPT_INDEX(KERNEL_BASE) == BIT(PML4_INDEX_BITS) - 2);
-    assert(GET_PDPT_INDEX(PPTR_KDEV) == BIT(PML4_INDEX_BITS) - 1);
-    assert(IS_ALIGNED(KERNEL_BASE, seL4_HugePageBits));
-    assert(IS_ALIGNED(PPTR_KDEV, seL4_HugePageBits));
+    assert(GET_PML4_INDEX(KERNEL_ELF_BASE) == BIT(PML4_INDEX_BITS) - 1);
+    assert(GET_PDPT_INDEX(KERNEL_ELF_BASE) == BIT(PML4_INDEX_BITS) - 2);
+    assert(GET_PDPT_INDEX(KDEV_BASE) == BIT(PML4_INDEX_BITS) - 1);
+    assert(IS_ALIGNED(KERNEL_ELF_BASE - KERNEL_ELF_PADDR_BASE, seL4_HugePageBits));
+    assert(IS_ALIGNED(KDEV_BASE, seL4_HugePageBits));
 
     /* place the PDPT into the PML4 */
     x64KSKernelPML4[GET_PML4_INDEX(PPTR_BASE)] = pml4e_new(
@@ -1511,22 +1608,22 @@ map_kernel_window(
                                                                 );
     }
 
-    x64KSKernelPDPT[GET_PDPT_INDEX(KERNEL_BASE)] = pdpte_pdpte_pd_new(
-                                                       0, /* xd */
-                                                       kpptr_to_paddr(&x64KSKernelPDs[0][0]),
-                                                       0, /* accessed */
-                                                       0, /* cache disable */
-                                                       1, /* write through */
-                                                       0, /* super user */
-                                                       1, /* read write */
-                                                       1  /* present */
-                                                   );
+    x64KSKernelPDPT[GET_PDPT_INDEX(KERNEL_ELF_BASE)] = pdpte_pdpte_pd_new(
+                                                           0, /* xd */
+                                                           kpptr_to_paddr(&x64KSKernelPDs[0][0]),
+                                                           0, /* accessed */
+                                                           0, /* cache disable */
+                                                           1, /* write through */
+                                                           0, /* super user */
+                                                           1, /* read write */
+                                                           1  /* present */
+                                                       );
 
     paddr = 0;
     vaddr = PPTR_BASE;
 
     for (paddr = 0; paddr < PADDR_TOP;
-            paddr += 0x200000) {
+         paddr += 0x200000) {
 
         int pd_index = GET_PDPT_INDEX(vaddr) - GET_PDPT_INDEX(PPTR_BASE);
         int pde_index = GET_PD_INDEX(vaddr);
@@ -1548,7 +1645,7 @@ map_kernel_window(
     }
 
     /* put the PD into the PDPT */
-    x64KSKernelPDPT[GET_PDPT_INDEX(PPTR_KDEV)] = pdpte_pdpte_pd_new(
+    x64KSKernelPDPT[GET_PDPT_INDEX(KDEV_BASE)] = pdpte_pdpte_pd_new(
                                                      0, /* xd */
                                                      kpptr_to_paddr(&x64KSKernelPDs[BIT(PDPT_INDEX_BITS) - 1][0]),
                                                      0, /* accessed */
@@ -1576,7 +1673,7 @@ map_kernel_window(
     /* use the last PD entry as the benchmark log storage.
      * the actual backing physical memory will be filled
      * later by using alloc_region */
-    ksLog = (ks_log_entry_t *)(PPTR_KDEV + 0x200000 * (BIT(PD_INDEX_BITS) - 1));
+    ksLog = (ks_log_entry_t *)(KDEV_BASE + 0x200000 * (BIT(PD_INDEX_BITS) - 1));
 #endif
 
     /* now map in the kernel devices */
@@ -1596,8 +1693,7 @@ map_kernel_window(
 }
 
 #ifdef CONFIG_KERNEL_SKIM_WINDOW
-BOOT_CODE bool_t
-map_skim_window(vptr_t skim_start, vptr_t skim_end)
+BOOT_CODE bool_t map_skim_window(vptr_t skim_start, vptr_t skim_end)
 {
     /* place the PDPT into the PML4 */
     x64KSSKIMPML4[GET_PML4_INDEX(PPTR_BASE)] = pml4e_new(
@@ -1611,20 +1707,20 @@ map_skim_window(vptr_t skim_start, vptr_t skim_end)
                                                    1  /* present */
                                                );
     /* place the PD into the kernel_base slot of the PDPT */
-    x64KSSKIMPDPT[GET_PDPT_INDEX(KERNEL_BASE)] = pdpte_pdpte_pd_new(
-                                                     0, /* xd */
-                                                     kpptr_to_paddr(x64KSSKIMPD),
-                                                     0, /* accessed */
-                                                     0, /* cache_disabled */
-                                                     0, /* write_through */
-                                                     0, /* super_user */
-                                                     1, /* read_write */
-                                                     1  /* present */
-                                                 );
+    x64KSSKIMPDPT[GET_PDPT_INDEX(KERNEL_ELF_BASE)] = pdpte_pdpte_pd_new(
+                                                         0, /* xd */
+                                                         kpptr_to_paddr(x64KSSKIMPD),
+                                                         0, /* accessed */
+                                                         0, /* cache_disabled */
+                                                         0, /* write_through */
+                                                         0, /* super_user */
+                                                         1, /* read_write */
+                                                         1  /* present */
+                                                     );
     /* map the skim portion into the PD. we expect it to be 2M aligned */
     assert((skim_start % BIT(seL4_LargePageBits)) == 0);
     assert((skim_end % BIT(seL4_LargePageBits)) == 0);
-    uint64_t paddr = kpptr_to_paddr((void*)skim_start);
+    uint64_t paddr = kpptr_to_paddr((void *)skim_start);
     for (int i = GET_PD_INDEX(skim_start); i < GET_PD_INDEX(skim_end); i++) {
         x64KSSKIMPD[i] = pde_pde_large_new(
                              0, /* xd */
@@ -1645,8 +1741,7 @@ map_skim_window(vptr_t skim_start, vptr_t skim_end)
 }
 #endif
 
-BOOT_CODE void
-init_tss(tss_t *tss)
+BOOT_CODE void init_tss(tss_t *tss)
 {
     word_t base = (word_t)&x64KSIRQStack[CURRENT_CPU_INDEX()][IRQ_STACK_SIZE];
     *tss = tss_new(
@@ -1664,11 +1759,11 @@ init_tss(tss_t *tss)
                0, 0        /* rsp 0 */
            );
     /* set the IO map to all 1 to block user IN/OUT instructions */
-    memset(&x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.io_map[0], 0xff, sizeof(x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.io_map));
+    memset(&x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.io_map[0], 0xff,
+           sizeof(x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.io_map));
 }
 
-BOOT_CODE void
-init_syscall_msrs(void)
+BOOT_CODE void init_syscall_msrs(void)
 {
     x86_wrmsr(IA32_LSTAR_MSR, (uint64_t)&handle_fastsyscall);
     // mask bit 9 in the kernel (which is the interrupt enable bit)
@@ -1678,8 +1773,7 @@ init_syscall_msrs(void)
     x86_wrmsr(IA32_STAR_MSR, ((uint64_t)SEL_CS_0 << 32) | ((uint64_t)SEL_CS_3 << 48));
 }
 
-BOOT_CODE void
-init_gdt(gdt_entry_t *gdt, tss_t *tss)
+BOOT_CODE void init_gdt(gdt_entry_t *gdt, tss_t *tss)
 {
 
     uint64_t tss_base = (uint64_t)tss;
@@ -1745,33 +1839,33 @@ init_gdt(gdt_entry_t *gdt, tss_t *tss)
                         0xffff
                     );
 
-    gdt[GDT_TLS] = gdt_entry_gdt_data_new(
-                       0,
-                       1,
-                       1,
-                       0,
-                       0xf,
-                       1,
-                       3,
-                       1,
-                       0,
-                       0,
-                       0xffff
-                   );
+    gdt[GDT_FS] = gdt_entry_gdt_data_new(
+                      0,
+                      1,
+                      1,
+                      0,
+                      0xf,
+                      1,
+                      3,
+                      1,
+                      0,
+                      0,
+                      0xffff
+                  );
 
-    gdt[GDT_IPCBUF] = gdt_entry_gdt_data_new(
-                          0,
-                          1,
-                          1,
-                          0,
-                          0xf,
-                          1,
-                          3,
-                          1,
-                          0,
-                          0,
-                          0xffff
-                      );
+    gdt[GDT_GS] = gdt_entry_gdt_data_new(
+                      0,
+                      1,
+                      1,
+                      0,
+                      0xf,
+                      1,
+                      3,
+                      1,
+                      0,
+                      0,
+                      0xffff
+                  );
 
     gdt_tss = gdt_tss_new(
                   tss_base >> 32,                     /* base 63 - 32 */
@@ -1791,8 +1885,7 @@ init_gdt(gdt_entry_t *gdt, tss_t *tss)
     gdt[GDT_TSS + 1].words[0] = gdt_tss.words[1];
 }
 
-BOOT_CODE void
-init_idt_entry(idt_entry_t *idt, interrupt_t interrupt, void(*handler)(void))
+BOOT_CODE void init_idt_entry(idt_entry_t *idt, interrupt_t interrupt, void(*handler)(void))
 {
     uint64_t handler_addr = (uint64_t)handler;
     uint64_t dpl = 3;
@@ -1823,7 +1916,7 @@ void setVMRoot(tcb_t *tcb)
     threadRoot = TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap;
 
     if (cap_get_capType(threadRoot) != cap_pml4_cap ||
-            !cap_pml4_cap_get_capPML4IsMapped(threadRoot)) {
+        !cap_pml4_cap_get_capPML4IsMapped(threadRoot)) {
         setCurrentUserVSpaceRoot(kpptr_to_paddr(X86_GLOBAL_VSPACE_ROOT), 0);
         return;
     }
@@ -1843,8 +1936,7 @@ void setVMRoot(tcb_t *tcb)
 }
 
 
-BOOT_CODE void
-init_dtrs(void)
+BOOT_CODE void init_dtrs(void)
 {
     gdt_idt_ptr.limit = (sizeof(gdt_entry_t) * GDT_ENTRIES) - 1;
     gdt_idt_ptr.base = (uint64_t)x86KSGlobalState[CURRENT_CPU_INDEX()].x86KSgdt;
@@ -1857,7 +1949,7 @@ init_dtrs(void)
     x64_install_gdt(&gdt_idt_ptr);
     swapgs();
 
-    gdt_idt_ptr.limit = (sizeof(idt_entry_t) * (int_max + 1 )) - 1;
+    gdt_idt_ptr.limit = (sizeof(idt_entry_t) * (int_max + 1)) - 1;
     gdt_idt_ptr.base = (uint64_t)x86KSGlobalState[CURRENT_CPU_INDEX()].x86KSidt;
     x64_install_idt(&gdt_idt_ptr);
 
@@ -1866,15 +1958,14 @@ init_dtrs(void)
     x64_install_tss(SEL_TSS);
 }
 
-BOOT_CODE void
-map_it_frame_cap(cap_t pd_cap, cap_t frame_cap)
+BOOT_CODE void map_it_frame_cap(cap_t pd_cap, cap_t frame_cap)
 {
     pml4e_t *pml4 = PML4_PTR(pptr_of_cap(pd_cap));
     pdpte_t *pdpt;
     pde_t *pd;
     pte_t *pt;
     vptr_t vptr = cap_frame_cap_get_capFMappedAddress(frame_cap);
-    void *pptr = (void*)cap_frame_cap_get_capFBasePtr(frame_cap);
+    void *pptr = (void *)cap_frame_cap_get_capFBasePtr(frame_cap);
 
     assert(cap_frame_cap_get_capFMapType(frame_cap) == X86_MappingVSpace);
     assert(cap_frame_cap_get_capFMappedASID(frame_cap) != asidInvalid);
@@ -1902,8 +1993,7 @@ map_it_frame_cap(cap_t pd_cap, cap_t frame_cap)
                                  );
 }
 
-static BOOT_CODE void
-map_it_pdpt_cap(cap_t vspace_cap, cap_t pdpt_cap)
+static BOOT_CODE void map_it_pdpt_cap(cap_t vspace_cap, cap_t pdpt_cap)
 {
     pml4e_t *pml4 = PML4_PTR(pptr_of_cap(vspace_cap));
     pdpte_t *pdpt = PDPT_PTR(cap_pdpt_cap_get_capPDPTBasePtr(pdpt_cap));
@@ -1922,8 +2012,7 @@ map_it_pdpt_cap(cap_t vspace_cap, cap_t pdpt_cap)
                                      );
 }
 
-BOOT_CODE void
-map_it_pd_cap(cap_t vspace_cap, cap_t pd_cap)
+BOOT_CODE void map_it_pd_cap(cap_t vspace_cap, cap_t pd_cap)
 {
     pml4e_t *pml4 = PML4_PTR(pptr_of_cap(vspace_cap));
     pdpte_t *pdpt;
@@ -1946,8 +2035,7 @@ map_it_pd_cap(cap_t vspace_cap, cap_t pd_cap)
                                      );
 }
 
-BOOT_CODE void
-map_it_pt_cap(cap_t vspace_cap, cap_t pt_cap)
+BOOT_CODE void map_it_pt_cap(cap_t vspace_cap, cap_t pt_cap)
 {
     pml4e_t *pml4 = PML4_PTR(pptr_of_cap(vspace_cap));
     pdpte_t *pdpt;
@@ -1974,8 +2062,7 @@ map_it_pt_cap(cap_t vspace_cap, cap_t pt_cap)
                                  );
 }
 
-BOOT_CODE void*
-map_temp_boot_page(void* entry, uint32_t large_pages)
+BOOT_CODE void *map_temp_boot_page(void *entry, uint32_t large_pages)
 {
     /* this function is for legacy 32-bit systems where the ACPI tables might
      * collide with the kernel window. Here we just assert that the table is
@@ -1985,8 +2072,7 @@ map_temp_boot_page(void* entry, uint32_t large_pages)
     return entry;
 }
 
-static BOOT_CODE cap_t
-create_it_pdpt_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid)
+static BOOT_CODE cap_t create_it_pdpt_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid)
 {
     cap_t cap;
     cap = cap_pdpt_cap_new(
@@ -1999,8 +2085,7 @@ create_it_pdpt_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid)
     return cap;
 }
 
-static BOOT_CODE cap_t
-create_it_pd_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid)
+static BOOT_CODE cap_t create_it_pd_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid)
 {
     cap_t cap;
     cap = cap_page_directory_cap_new(
@@ -2013,8 +2098,7 @@ create_it_pd_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid)
     return cap;
 }
 
-static BOOT_CODE cap_t
-create_it_pt_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid)
+static BOOT_CODE cap_t create_it_pt_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid)
 {
     cap_t cap;
     cap = cap_page_table_cap_new(
@@ -2027,26 +2111,30 @@ create_it_pt_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid)
     return cap;
 }
 
-BOOT_CODE cap_t
-create_it_address_space(cap_t root_cnode_cap, v_region_t it_v_reg)
+
+BOOT_CODE word_t arch_get_n_paging(v_region_t it_v_reg)
+{
+    word_t n = get_n_paging(it_v_reg, PD_INDEX_OFFSET);
+    n += get_n_paging(it_v_reg, PDPT_INDEX_OFFSET);
+    n += get_n_paging(it_v_reg, PML4_INDEX_OFFSET);
+#ifdef CONFIG_IOMMU
+    n += vtd_get_n_paging(&boot_state.rmrr_list);
+#endif
+    return n;
+}
+
+BOOT_CODE cap_t create_it_address_space(cap_t root_cnode_cap, v_region_t it_v_reg)
 {
     cap_t      vspace_cap;
     vptr_t     vptr;
-    pptr_t     pptr;
     seL4_SlotPos slot_pos_before;
     seL4_SlotPos slot_pos_after;
 
     slot_pos_before = ndks_boot.slot_pos_cur;
-    /* create the PML4 */
-    pptr = alloc_region(seL4_PML4Bits);
-    if (!pptr) {
-        return cap_null_cap_new();
-    }
-    memzero(PML4_PTR(pptr), BIT(seL4_PML4Bits));
-    copyGlobalMappings(PML4_PTR(pptr));
+    copyGlobalMappings(PML4_PTR(rootserver.vspace));
     vspace_cap = cap_pml4_cap_new(
                      IT_ASID,        /* capPML4MappedASID */
-                     pptr,           /* capPML4BasePtr   */
+                     rootserver.vspace,           /* capPML4BasePtr   */
                      1               /* capPML4IsMapped   */
                  );
 
@@ -2055,15 +2143,10 @@ create_it_address_space(cap_t root_cnode_cap, v_region_t it_v_reg)
 
     /* Create any PDPTs needed for the user land image */
     for (vptr = ROUND_DOWN(it_v_reg.start, PML4_INDEX_OFFSET);
-            vptr < it_v_reg.end;
-            vptr += BIT(PML4_INDEX_OFFSET)) {
-        pptr = alloc_region(seL4_PDPTBits);
-        if (!pptr) {
-            return cap_null_cap_new();
-        }
-        memzero(PDPT_PTR(pptr), BIT(seL4_PDPTBits));
+         vptr < it_v_reg.end;
+         vptr += BIT(PML4_INDEX_OFFSET)) {
         if (!provide_cap(root_cnode_cap,
-                         create_it_pdpt_cap(vspace_cap, pptr, vptr, IT_ASID))
+                         create_it_pdpt_cap(vspace_cap, it_alloc_paging(), vptr, IT_ASID))
            ) {
             return cap_null_cap_new();
         }
@@ -2071,15 +2154,10 @@ create_it_address_space(cap_t root_cnode_cap, v_region_t it_v_reg)
 
     /* Create any PDs needed for the user land image */
     for (vptr = ROUND_DOWN(it_v_reg.start, PDPT_INDEX_OFFSET);
-            vptr < it_v_reg.end;
-            vptr += BIT(PDPT_INDEX_OFFSET)) {
-        pptr = alloc_region(seL4_PageDirBits);
-        if (!pptr) {
-            return cap_null_cap_new();
-        }
-        memzero(PD_PTR(pptr), BIT(seL4_PageDirBits));
+         vptr < it_v_reg.end;
+         vptr += BIT(PDPT_INDEX_OFFSET)) {
         if (!provide_cap(root_cnode_cap,
-                         create_it_pd_cap(vspace_cap, pptr, vptr, IT_ASID))
+                         create_it_pd_cap(vspace_cap, it_alloc_paging(), vptr, IT_ASID))
            ) {
             return cap_null_cap_new();
         }
@@ -2087,15 +2165,10 @@ create_it_address_space(cap_t root_cnode_cap, v_region_t it_v_reg)
 
     /* Create any PTs needed for the user land image */
     for (vptr = ROUND_DOWN(it_v_reg.start, PD_INDEX_OFFSET);
-            vptr < it_v_reg.end;
-            vptr += BIT(PD_INDEX_OFFSET)) {
-        pptr = alloc_region(seL4_PageTableBits);
-        if (!pptr) {
-            return cap_null_cap_new();
-        }
-        memzero(PT_PTR(pptr), BIT(seL4_PageTableBits));
+         vptr < it_v_reg.end;
+         vptr += BIT(PD_INDEX_OFFSET)) {
         if (!provide_cap(root_cnode_cap,
-                         create_it_pt_cap(vspace_cap, pptr, vptr, IT_ASID))
+                         create_it_pt_cap(vspace_cap, it_alloc_paging(), vptr, IT_ASID))
            ) {
             return cap_null_cap_new();
         }
@@ -2122,8 +2195,7 @@ void copyGlobalMappings(vspace_root_t *new_vspace)
     }
 }
 
-static BOOT_CODE cap_t
-create_it_frame_cap(pptr_t pptr, vptr_t vptr, asid_t asid, bool_t use_large, seL4_Word map_type)
+static BOOT_CODE cap_t create_it_frame_cap(pptr_t pptr, vptr_t vptr, asid_t asid, bool_t use_large, seL4_Word map_type)
 {
     vm_page_size_t frame_size;
 
@@ -2145,14 +2217,13 @@ create_it_frame_cap(pptr_t pptr, vptr_t vptr, asid_t asid, bool_t use_large, seL
         );
 }
 
-BOOT_CODE cap_t
-create_unmapped_it_frame_cap(pptr_t pptr, bool_t use_large)
+BOOT_CODE cap_t create_unmapped_it_frame_cap(pptr_t pptr, bool_t use_large)
 {
     return create_it_frame_cap(pptr, 0, asidInvalid, use_large, X86_MappingNone);
 }
 
-BOOT_CODE cap_t
-create_mapped_it_frame_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid, bool_t use_large, bool_t executable UNUSED)
+BOOT_CODE cap_t create_mapped_it_frame_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t asid, bool_t use_large,
+                                           bool_t executable UNUSED)
 {
     cap_t cap = create_it_frame_cap(pptr, vptr, asid, use_large, X86_MappingVSpace);
     map_it_frame_cap(vspace_cap, cap);
@@ -2163,8 +2234,7 @@ create_mapped_it_frame_cap(cap_t vspace_cap, pptr_t pptr, vptr_t vptr, asid_t as
 
 
 
-exception_t
-performASIDPoolInvocation(asid_t asid, asid_pool_t *poolPtr, cte_t *vspaceCapSlot)
+exception_t performASIDPoolInvocation(asid_t asid, asid_pool_t *poolPtr, cte_t *vspaceCapSlot)
 {
     asid_map_t asid_map;
 #ifdef CONFIG_VTX
@@ -2184,21 +2254,18 @@ performASIDPoolInvocation(asid_t asid, asid_pool_t *poolPtr, cte_t *vspaceCapSlo
     return EXCEPTION_NONE;
 }
 
-bool_t CONST
-isVTableRoot(cap_t cap)
+bool_t CONST isVTableRoot(cap_t cap)
 {
     return cap_get_capType(cap) == cap_pml4_cap;
 }
 
-bool_t CONST
-isValidNativeRoot(cap_t cap)
+bool_t CONST isValidNativeRoot(cap_t cap)
 {
     return isVTableRoot(cap) &&
            cap_pml4_cap_get_capPML4IsMapped(cap);
 }
 
-static pml4e_t CONST
-makeUserPML4E(paddr_t paddr, vm_attributes_t vm_attr)
+static pml4e_t CONST makeUserPML4E(paddr_t paddr, vm_attributes_t vm_attr)
 {
     return pml4e_new(
                0,
@@ -2212,8 +2279,7 @@ makeUserPML4E(paddr_t paddr, vm_attributes_t vm_attr)
            );
 }
 
-static pml4e_t CONST
-makeUserPML4EInvalid(void)
+static pml4e_t CONST makeUserPML4EInvalid(void)
 {
     return pml4e_new(
                0,                  /* xd               */
@@ -2227,8 +2293,7 @@ makeUserPML4EInvalid(void)
            );
 }
 
-static pdpte_t CONST
-makeUserPDPTEHugePage(paddr_t paddr, vm_attributes_t vm_attr, vm_rights_t vm_rights)
+static pdpte_t CONST makeUserPDPTEHugePage(paddr_t paddr, vm_attributes_t vm_attr, vm_rights_t vm_rights)
 {
     return pdpte_pdpte_1g_new(
                0,          /* xd               */
@@ -2245,8 +2310,7 @@ makeUserPDPTEHugePage(paddr_t paddr, vm_attributes_t vm_attr, vm_rights_t vm_rig
            );
 }
 
-static pdpte_t CONST
-makeUserPDPTEPageDirectory(paddr_t paddr, vm_attributes_t vm_attr)
+static pdpte_t CONST makeUserPDPTEPageDirectory(paddr_t paddr, vm_attributes_t vm_attr)
 {
     return pdpte_pdpte_pd_new(
                0,                      /* xd       */
@@ -2260,8 +2324,7 @@ makeUserPDPTEPageDirectory(paddr_t paddr, vm_attributes_t vm_attr)
            );
 }
 
-static pdpte_t CONST
-makeUserPDPTEInvalid(void)
+static pdpte_t CONST makeUserPDPTEInvalid(void)
 {
     return pdpte_pdpte_pd_new(
                0,          /* xd               */
@@ -2275,8 +2338,7 @@ makeUserPDPTEInvalid(void)
            );
 }
 
-pde_t CONST
-makeUserPDELargePage(paddr_t paddr, vm_attributes_t vm_attr, vm_rights_t vm_rights)
+pde_t CONST makeUserPDELargePage(paddr_t paddr, vm_attributes_t vm_attr, vm_rights_t vm_rights)
 {
     return pde_pde_large_new(
                0,                                              /* xd                   */
@@ -2293,8 +2355,7 @@ makeUserPDELargePage(paddr_t paddr, vm_attributes_t vm_attr, vm_rights_t vm_righ
            );
 }
 
-pde_t CONST
-makeUserPDEPageTable(paddr_t paddr, vm_attributes_t vm_attr)
+pde_t CONST makeUserPDEPageTable(paddr_t paddr, vm_attributes_t vm_attr)
 {
 
     return  pde_pde_pt_new(
@@ -2309,8 +2370,7 @@ makeUserPDEPageTable(paddr_t paddr, vm_attributes_t vm_attr)
             );
 }
 
-pde_t CONST
-makeUserPDEInvalid(void)
+pde_t CONST makeUserPDEInvalid(void)
 {
     /* The bitfield only declares two kinds of PDE entries (page tables or large pages)
      * and an invalid entry should really be a third type, but we can simulate it by
@@ -2327,8 +2387,7 @@ makeUserPDEInvalid(void)
            );
 }
 
-pte_t CONST
-makeUserPTE(paddr_t paddr, vm_attributes_t vm_attr, vm_rights_t vm_rights)
+pte_t CONST makeUserPTE(paddr_t paddr, vm_attributes_t vm_attr, vm_rights_t vm_rights)
 {
     return pte_new(
                0,                                              /* xd                   */
@@ -2345,8 +2404,7 @@ makeUserPTE(paddr_t paddr, vm_attributes_t vm_attr, vm_rights_t vm_rights)
            );
 }
 
-pte_t CONST
-makeUserPTEInvalid(void)
+pte_t CONST makeUserPTEInvalid(void)
 {
     return pte_new(
                0,                   /* xd                   */
@@ -2364,16 +2422,14 @@ makeUserPTEInvalid(void)
 }
 
 
-static pml4e_t*
-lookupPML4Slot(vspace_root_t*pml4, vptr_t vptr)
+static pml4e_t *lookupPML4Slot(vspace_root_t *pml4, vptr_t vptr)
 {
     pml4e_t *pml4e = PML4E_PTR(pml4);
     word_t pml4Index = GET_PML4_INDEX(vptr);
     return pml4e + pml4Index;
 }
 
-static lookupPDPTSlot_ret_t
-lookupPDPTSlot(vspace_root_t *pml4, vptr_t vptr)
+static lookupPDPTSlot_ret_t lookupPDPTSlot(vspace_root_t *pml4, vptr_t vptr)
 {
     pml4e_t *pml4Slot = lookupPML4Slot(pml4, vptr);
     lookupPDPTSlot_ret_t ret;
@@ -2397,8 +2453,7 @@ lookupPDPTSlot(vspace_root_t *pml4, vptr_t vptr)
     }
 }
 
-lookupPDSlot_ret_t
-lookupPDSlot(vspace_root_t *pml4, vptr_t vptr)
+lookupPDSlot_ret_t lookupPDSlot(vspace_root_t *pml4, vptr_t vptr)
 {
     lookupPDPTSlot_ret_t pdptSlot;
     lookupPDSlot_ret_t ret;
@@ -2411,7 +2466,7 @@ lookupPDSlot(vspace_root_t *pml4, vptr_t vptr)
         return ret;
     }
     if ((pdpte_ptr_get_page_size(pdptSlot.pdptSlot) != pdpte_pdpte_pd) ||
-            !pdpte_pdpte_pd_ptr_get_present(pdptSlot.pdptSlot)) {
+        !pdpte_pdpte_pd_ptr_get_present(pdptSlot.pdptSlot)) {
         current_lookup_fault = lookup_fault_missing_capability_new(PDPT_INDEX_OFFSET);
 
         ret.pdSlot = NULL;
@@ -2430,8 +2485,7 @@ lookupPDSlot(vspace_root_t *pml4, vptr_t vptr)
     }
 }
 
-static void
-flushPD(vspace_root_t *vspace, word_t vptr, pde_t *pd, asid_t asid)
+static void flushPD(vspace_root_t *vspace, word_t vptr, pde_t *pd, asid_t asid)
 {
     /* clearing the entire PCID vs flushing the virtual addresses
      * one by one using invplg.
@@ -2441,22 +2495,19 @@ flushPD(vspace_root_t *vspace, word_t vptr, pde_t *pd, asid_t asid)
 
 }
 
-static void
-flushPDPT(vspace_root_t *vspace, word_t vptr, pdpte_t *pdpt, asid_t asid)
+static void flushPDPT(vspace_root_t *vspace, word_t vptr, pdpte_t *pdpt, asid_t asid)
 {
     /* similar here */
     invalidateASID(vspace, asid, SMP_TERNARY(tlb_bitmap_get(vspace), 0));
     return;
 }
 
-void
-hwASIDInvalidate(asid_t asid, vspace_root_t *vspace)
+void hwASIDInvalidate(asid_t asid, vspace_root_t *vspace)
 {
     invalidateASID(vspace, asid, SMP_TERNARY(tlb_bitmap_get(vspace), 0));
 }
 
-void
-unmapPageDirectory(asid_t asid, vptr_t vaddr, pde_t *pd)
+void unmapPageDirectory(asid_t asid, vptr_t vaddr, pde_t *pd)
 {
     findVSpaceForASID_ret_t find_ret;
     lookupPDPTSlot_ret_t    lu_ret;
@@ -2472,9 +2523,9 @@ unmapPageDirectory(asid_t asid, vptr_t vaddr, pde_t *pd)
     }
 
     /* check if the PDPT has the PD */
-    if (! (pdpte_ptr_get_page_size(lu_ret.pdptSlot) == pdpte_pdpte_pd &&
-            pdpte_pdpte_pd_ptr_get_present(lu_ret.pdptSlot) &&
-            (pdpte_pdpte_pd_ptr_get_pd_base_address(lu_ret.pdptSlot) == pptr_to_paddr(pd)))) {
+    if (!(pdpte_ptr_get_page_size(lu_ret.pdptSlot) == pdpte_pdpte_pd &&
+          pdpte_pdpte_pd_ptr_get_present(lu_ret.pdptSlot) &&
+          (pdpte_pdpte_pd_ptr_get_pd_base_address(lu_ret.pdptSlot) == pptr_to_paddr(pd)))) {
         return;
     }
 
@@ -2487,8 +2538,7 @@ unmapPageDirectory(asid_t asid, vptr_t vaddr, pde_t *pd)
 }
 
 
-static exception_t
-performX64PageDirectoryInvocationUnmap(cap_t cap, cte_t *ctSlot)
+static exception_t performX64PageDirectoryInvocationUnmap(cap_t cap, cte_t *ctSlot)
 {
 
     if (cap_page_directory_cap_get_capPDIsMapped(cap)) {
@@ -2506,8 +2556,8 @@ performX64PageDirectoryInvocationUnmap(cap_t cap, cte_t *ctSlot)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performX64PageDirectoryInvocationMap(cap_t cap, cte_t *ctSlot, pdpte_t pdpte, pdpte_t *pdptSlot, vspace_root_t *vspace)
+static exception_t performX64PageDirectoryInvocationMap(cap_t cap, cte_t *ctSlot, pdpte_t pdpte, pdpte_t *pdptSlot,
+                                                        vspace_root_t *vspace)
 {
     ctSlot->cap = cap;
     *pdptSlot = pdpte;
@@ -2517,14 +2567,12 @@ performX64PageDirectoryInvocationMap(cap_t cap, cte_t *ctSlot, pdpte_t pdpte, pd
 }
 
 
-static exception_t
-decodeX64PageDirectoryInvocation(
+static exception_t decodeX64PageDirectoryInvocation(
     word_t label,
     word_t length,
-    cte_t* cte,
+    cte_t *cte,
     cap_t cap,
-    extra_caps_t extraCaps,
-    word_t* buffer
+    word_t *buffer
 )
 {
     word_t              vaddr;
@@ -2553,7 +2601,7 @@ decodeX64PageDirectoryInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    if (length < 2 || extraCaps.excaprefs[0] == NULL) {
+    if (length < 2 || current_extra_caps.excaprefs[0] == NULL) {
         userError("X64PageDirectory: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -2569,7 +2617,7 @@ decodeX64PageDirectoryInvocation(
 
     vaddr = getSyscallArg(0, buffer) & (~MASK(PDPT_INDEX_OFFSET));
     vm_attr = vmAttributesFromWord(getSyscallArg(1, buffer));
-    vspaceCap = extraCaps.excaprefs[0]->cap;
+    vspaceCap = current_extra_caps.excaprefs[0]->cap;
 
     if (!isValidNativeRoot(vspaceCap)) {
         current_syscall_error.type = seL4_InvalidCapability;
@@ -2581,7 +2629,7 @@ decodeX64PageDirectoryInvocation(
     vspace = (vspace_root_t *)pptr_of_cap(vspaceCap);
     asid = cap_get_capMappedASID(vspaceCap);
 
-    if (vaddr > PPTR_USER_TOP) {
+    if (vaddr > USER_TOP) {
         userError("X64PageDirectory: Mapping address too high.");
         current_syscall_error.type = seL4_InvalidArgument;
         current_syscall_error.invalidArgumentNumber = 0;
@@ -2615,9 +2663,9 @@ decodeX64PageDirectoryInvocation(
     }
 
     if ((pdpte_ptr_get_page_size(pdptSlot.pdptSlot) == pdpte_pdpte_pd &&
-            pdpte_pdpte_pd_ptr_get_present(pdptSlot.pdptSlot)) ||
-            (pdpte_ptr_get_page_size(pdptSlot.pdptSlot) == pdpte_pdpte_1g
-             && pdpte_pdpte_1g_ptr_get_present(pdptSlot.pdptSlot))) {
+         pdpte_pdpte_pd_ptr_get_present(pdptSlot.pdptSlot)) ||
+        (pdpte_ptr_get_page_size(pdptSlot.pdptSlot) == pdpte_pdpte_1g
+         && pdpte_pdpte_1g_ptr_get_present(pdptSlot.pdptSlot))) {
         current_syscall_error.type = seL4_DeleteFirst;
 
         return EXCEPTION_SYSCALL_ERROR;
@@ -2647,8 +2695,8 @@ static void unmapPDPT(asid_t asid, vptr_t vaddr, pdpte_t *pdpt)
     pml4Slot = lookupPML4Slot(find_ret.vspace_root, vaddr);
 
     /* check if the PML4 has the PDPT */
-    if (! (pml4e_ptr_get_present(pml4Slot) &&
-            pml4e_ptr_get_pdpt_base_address(pml4Slot) == pptr_to_paddr(pdpt))) {
+    if (!(pml4e_ptr_get_present(pml4Slot) &&
+          pml4e_ptr_get_pdpt_base_address(pml4Slot) == pptr_to_paddr(pdpt))) {
         return;
     }
 
@@ -2657,8 +2705,7 @@ static void unmapPDPT(asid_t asid, vptr_t vaddr, pdpte_t *pdpt)
     *pml4Slot = makeUserPML4EInvalid();
 }
 
-static exception_t
-performX64PDPTInvocationUnmap(cap_t cap, cte_t *ctSlot)
+static exception_t performX64PDPTInvocationUnmap(cap_t cap, cte_t *ctSlot)
 {
     if (cap_pdpt_cap_get_capPDPTIsMapped(cap)) {
         pdpte_t *pdpt = PDPTE_PTR(cap_pdpt_cap_get_capPDPTBasePtr(cap));
@@ -2673,8 +2720,8 @@ performX64PDPTInvocationUnmap(cap_t cap, cte_t *ctSlot)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performX64PDPTInvocationMap(cap_t cap, cte_t *ctSlot, pml4e_t pml4e, pml4e_t *pml4Slot, vspace_root_t *vspace)
+static exception_t performX64PDPTInvocationMap(cap_t cap, cte_t *ctSlot, pml4e_t pml4e, pml4e_t *pml4Slot,
+                                               vspace_root_t *vspace)
 {
     ctSlot->cap = cap;
     *pml4Slot = pml4e;
@@ -2684,13 +2731,11 @@ performX64PDPTInvocationMap(cap_t cap, cte_t *ctSlot, pml4e_t pml4e, pml4e_t *pm
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeX64PDPTInvocation(
+static exception_t decodeX64PDPTInvocation(
     word_t  label,
     word_t length,
     cte_t   *cte,
     cap_t   cap,
-    extra_caps_t extraCaps,
     word_t  *buffer)
 {
     word_t                  vaddr;
@@ -2720,7 +2765,7 @@ decodeX64PDPTInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    if (length < 2 || extraCaps.excaprefs[0] == NULL) {
+    if (length < 2 || current_extra_caps.excaprefs[0] == NULL) {
         userError("X64PDPT: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -2736,7 +2781,7 @@ decodeX64PDPTInvocation(
 
     vaddr = getSyscallArg(0, buffer) & (~MASK(PML4_INDEX_OFFSET));
     attr = vmAttributesFromWord(getSyscallArg(1, buffer));
-    vspaceCap = extraCaps.excaprefs[0]->cap;
+    vspaceCap = current_extra_caps.excaprefs[0]->cap;
 
     if (!isValidNativeRoot(vspaceCap)) {
         current_syscall_error.type = seL4_InvalidCapability;
@@ -2748,7 +2793,7 @@ decodeX64PDPTInvocation(
     vspace = (vspace_root_t *)pptr_of_cap(vspaceCap);
     asid = cap_get_capMappedASID(vspaceCap);
 
-    if (vaddr > PPTR_USER_TOP) {
+    if (vaddr > USER_TOP) {
         userError("X64PDPT: Mapping address too high.");
         current_syscall_error.type = seL4_InvalidArgument;
         current_syscall_error.invalidArgumentNumber = 0;
@@ -2792,15 +2837,14 @@ decodeX64PDPTInvocation(
     return performX64PDPTInvocationMap(cap, cte, pml4e, pml4Slot, vspace);
 }
 
-exception_t
-decodeX86ModeMMUInvocation(
+exception_t decodeX86ModeMMUInvocation(
     word_t label,
     word_t length,
     cptr_t cptr,
-    cte_t* cte,
+    cte_t *cte,
     cap_t cap,
-    extra_caps_t extraCaps,
-    word_t* buffer
+    bool_t call,
+    word_t *buffer
 )
 {
     switch (cap_get_capType(cap)) {
@@ -2810,10 +2854,10 @@ decodeX86ModeMMUInvocation(
         return EXCEPTION_SYSCALL_ERROR;
 
     case cap_pdpt_cap:
-        return decodeX64PDPTInvocation(label, length, cte, cap, extraCaps, buffer);
+        return decodeX64PDPTInvocation(label, length, cte, cap, buffer);
 
     case cap_page_directory_cap:
-        return decodeX64PageDirectoryInvocation(label, length, cte, cap, extraCaps, buffer);
+        return decodeX64PageDirectoryInvocation(label, length, cte, cap, buffer);
 
     default:
         fail("Invalid arch cap type");
@@ -2831,10 +2875,10 @@ bool_t modeUnmapPage(vm_page_size_t page_size, vspace_root_t *vroot, vptr_t vadd
         pdpte = pdpt_ret.pdptSlot;
 
 
-        if (! (pdpte_ptr_get_page_size(pdpte) == pdpte_pdpte_1g
-                && pdpte_pdpte_1g_ptr_get_present(pdpte)
-                &&  (pdpte_pdpte_1g_ptr_get_page_base_address(pdpte)
-                     == pptr_to_paddr(pptr)))) {
+        if (!(pdpte_ptr_get_page_size(pdpte) == pdpte_pdpte_1g
+              && pdpte_pdpte_1g_ptr_get_present(pdpte)
+              && (pdpte_pdpte_1g_ptr_get_page_base_address(pdpte)
+                  == pptr_to_paddr(pptr)))) {
             return false;
         }
 
@@ -2853,15 +2897,7 @@ static exception_t updatePDPTE(asid_t asid, pdpte_t pdpte, pdpte_t *pdptSlot, vs
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performX64ModeRemap(asid_t asid, pdpte_t pdpte, pdpte_t *pdptSlot, vspace_root_t *vspace)
-{
-    return updatePDPTE(asid, pdpte, pdptSlot, vspace);
-}
-
-
-static exception_t
-performX64ModeMap(cap_t cap, cte_t *ctSlot, pdpte_t pdpte, pdpte_t *pdptSlot, vspace_root_t *vspace)
+static exception_t performX64ModeMap(cap_t cap, cte_t *ctSlot, pdpte_t pdpte, pdpte_t *pdptSlot, vspace_root_t *vspace)
 {
     ctSlot->cap = cap;
     return updatePDPTE(cap_frame_cap_get_capFMappedASID(cap), pdpte, pdptSlot, vspace);
@@ -2874,9 +2910,9 @@ struct create_mapping_pdpte_return {
 };
 typedef struct create_mapping_pdpte_return create_mapping_pdpte_return_t;
 
-static create_mapping_pdpte_return_t
-createSafeMappingEntries_PDPTE(paddr_t base, word_t vaddr, vm_rights_t vmRights, vm_attributes_t attr,
-                               vspace_root_t *vspace)
+static create_mapping_pdpte_return_t createSafeMappingEntries_PDPTE(paddr_t base, word_t vaddr, vm_rights_t vmRights,
+                                                                    vm_attributes_t attr,
+                                                                    vspace_root_t *vspace)
 {
     create_mapping_pdpte_return_t ret;
     lookupPDPTSlot_ret_t          lu_ret;
@@ -2893,20 +2929,19 @@ createSafeMappingEntries_PDPTE(paddr_t base, word_t vaddr, vm_rights_t vmRights,
 
     /* check for existing page directory */
     if ((pdpte_ptr_get_page_size(ret.pdptSlot) == pdpte_pdpte_pd) &&
-            (pdpte_pdpte_pd_ptr_get_present(ret.pdptSlot))) {
+        (pdpte_pdpte_pd_ptr_get_present(ret.pdptSlot))) {
         current_syscall_error.type = seL4_DeleteFirst;
         ret.status = EXCEPTION_SYSCALL_ERROR;
         return ret;
     }
-
 
     ret.pdpte = makeUserPDPTEHugePage(base, attr, vmRights);
     ret.status = EXCEPTION_NONE;
     return ret;
 }
 
-exception_t
-decodeX86ModeMapRemapPage(word_t label, vm_page_size_t page_size, cte_t *cte, cap_t cap, vspace_root_t *vroot, vptr_t vaddr, paddr_t paddr, vm_rights_t vm_rights, vm_attributes_t vm_attr)
+exception_t decodeX86ModeMapPage(word_t label, vm_page_size_t page_size, cte_t *cte, cap_t cap,
+                                 vspace_root_t *vroot, vptr_t vaddr, paddr_t paddr, vm_rights_t vm_rights, vm_attributes_t vm_attr)
 {
     if (config_set(CONFIG_HUGE_PAGE) && page_size == X64_HugePage) {
         create_mapping_pdpte_return_t map_ret;
@@ -2919,18 +2954,12 @@ decodeX86ModeMapRemapPage(word_t label, vm_page_size_t page_size, cte_t *cte, ca
         setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
 
         switch (label) {
-        case X86PageMap: {
+        case X86PageMap:
             return performX64ModeMap(cap, cte, map_ret.pdpte, map_ret.pdptSlot, vroot);
-        }
 
-        case X86PageRemap: {
-            return performX64ModeRemap(cap_frame_cap_get_capFMappedASID(cap), map_ret.pdpte, map_ret.pdptSlot, vroot);
-        }
-
-        default: {
+        default:
             current_syscall_error.type = seL4_IllegalOperation;
             return EXCEPTION_SYSCALL_ERROR;
-        }
         }
     }
     fail("Invalid Page type");
@@ -2942,8 +2971,7 @@ typedef struct readWordFromVSpace_ret {
     word_t value;
 } readWordFromVSpace_ret_t;
 
-static readWordFromVSpace_ret_t
-readWordFromVSpace(vspace_root_t *vspace, word_t vaddr)
+static readWordFromVSpace_ret_t readWordFromVSpace(vspace_root_t *vspace, word_t vaddr)
 {
     readWordFromVSpace_ret_t ret;
     lookupPTSlot_ret_t ptSlot;
@@ -2956,16 +2984,16 @@ readWordFromVSpace(vspace_root_t *vspace, word_t vaddr)
 
     pdptSlot = lookupPDPTSlot(vspace, vaddr);
     if (pdptSlot.status == EXCEPTION_NONE &&
-            pdpte_ptr_get_page_size(pdptSlot.pdptSlot) == pdpte_pdpte_1g &&
-            pdpte_pdpte_1g_ptr_get_present(pdptSlot.pdptSlot)) {
+        pdpte_ptr_get_page_size(pdptSlot.pdptSlot) == pdpte_pdpte_1g &&
+        pdpte_pdpte_1g_ptr_get_present(pdptSlot.pdptSlot)) {
 
         paddr = pdpte_pdpte_1g_ptr_get_page_base_address(pdptSlot.pdptSlot);
         offset = vaddr & MASK(seL4_HugePageBits);
     } else {
         pdSlot = lookupPDSlot(vspace, vaddr);
         if (pdSlot.status == EXCEPTION_NONE &&
-                ((pde_ptr_get_page_size(pdSlot.pdSlot) == pde_pde_large) &&
-                 pde_pde_large_ptr_get_present(pdSlot.pdSlot))) {
+            ((pde_ptr_get_page_size(pdSlot.pdSlot) == pde_pde_large) &&
+             pde_pde_large_ptr_get_present(pdSlot.pdSlot))) {
 
             paddr = pde_pde_large_ptr_get_page_base_address(pdSlot.pdSlot);
             offset = vaddr & MASK(seL4_LargePageBits);
@@ -2983,14 +3011,13 @@ readWordFromVSpace(vspace_root_t *vspace, word_t vaddr)
 
 
     kernel_vaddr = (word_t)paddr_to_pptr(paddr);
-    value = (word_t*)(kernel_vaddr + offset);
+    value = (word_t *)(kernel_vaddr + offset);
     ret.status = EXCEPTION_NONE;
     ret.value = *value;
     return ret;
 }
 
-void
-Arch_userStackTrace(tcb_t *tptr)
+void Arch_userStackTrace(tcb_t *tptr)
 {
     cap_t threadRoot;
     vspace_root_t *vspace_root;
@@ -3005,7 +3032,7 @@ Arch_userStackTrace(tcb_t *tptr)
         return;
     }
 
-    vspace_root = (vspace_root_t*)pptr_of_cap(threadRoot);
+    vspace_root = (vspace_root_t *)pptr_of_cap(threadRoot);
 
     sp = getRegister(tptr, RSP);
     /* check for alignment so we don't have to worry about accessing
@@ -3028,18 +3055,579 @@ Arch_userStackTrace(tcb_t *tptr)
 }
 #endif /* CONFIG_PRINTING */
 
+#ifdef CONFIG_KERNEL_LOG_BUFFER
+exception_t benchmark_arch_map_logBuffer(word_t frame_cptr)
+{
+    lookupCapAndSlot_ret_t lu_ret;
+    vm_page_size_t frameSize;
+    pptr_t frame_pptr;
+
+    /* faulting section */
+    lu_ret = lookupCapAndSlot(NODE_STATE(ksCurThread), frame_cptr);
+
+    if (unlikely(lu_ret.status != EXCEPTION_NONE)) {
+        userError("Invalid cap #%lu.", frame_cptr);
+        current_fault = seL4_Fault_CapFault_new(frame_cptr, false);
+
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+
+    if (cap_get_capType(lu_ret.cap) != cap_frame_cap) {
+        userError("Invalid cap. Log buffer should be of a frame cap");
+        current_fault = seL4_Fault_CapFault_new(frame_cptr, false);
+
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+
+    frameSize = cap_frame_cap_get_capFSize(lu_ret.cap);
+
+    if (frameSize != X86_LargePage) {
+        userError("Invalid size for log Buffer. The kernel expects at least 1M log buffer");
+        current_fault = seL4_Fault_CapFault_new(frame_cptr, false);
+
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+
+    frame_pptr = cap_frame_cap_get_capFBasePtr(lu_ret.cap);
+
+    ksUserLogBuffer = pptr_to_paddr((void *) frame_pptr);
+
+    pde_t pde = pde_pde_large_new(
+                    0,                 /* xd                   */
+                    ksUserLogBuffer,   /* page_base_address    */
+                    VMKernelOnly,      /* pat                  */
+                    1,                 /* global               */
+                    0,                 /* dirty                */
+                    0,                 /* accessed             */
+                    0,                 /* cache_disabled       */
+                    1,                 /* write_through        */
+                    1,                 /* super_user           */
+                    1,                 /* read_write           */
+                    1                  /* present              */
+                );
+
+    /* Stored in the PD slot after the device page table */
+#ifdef CONFIG_HUGE_PAGE
+    x64KSKernelPD[1] = pde;
+#else
+    x64KSKernelPDs[BIT(PDPT_INDEX_BITS) - 1][1] = pde;
+#endif
+    invalidateTranslationAll(MASK(CONFIG_MAX_NUM_NODES));
+
+    return EXCEPTION_NONE;
+}
+#endif /* CONFIG_KERNEL_LOG_BUFFER */
+#line 1 "/Users/payas/git/seL4/src/arch/x86/64/machine/capdl.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
+#include <config.h>
+
+#ifdef CONFIG_DEBUG_BUILD
+
+#include <arch/machine/capdl.h>
+#include <string.h>
+#include <kernel/cspace.h>
+
+word_t get_tcb_sp(tcb_t *tcb)
+{
+    return tcb->tcbArch.tcbContext.registers[RSP];
+}
+
+#ifdef CONFIG_PRINTING
+
+static void obj_frame_print_attrs(paddr_t paddr, word_t page_size);
+static void _cap_frame_print_attrs_vptr(word_t vptr, vspace_root_t *vspace);
+static void cap_frame_print_attrs_vptr(word_t vptr, cap_t vspace);
+static void obj_asidpool_print_attrs(cap_t asid_cap);
+static void cap_frame_print_attrs_pdpt(pdpte_t *pdptSlot);
+static void cap_frame_print_attrs_pd(pde_t *pdSlot);
+static void cap_frame_print_attrs_pt(pte_t *ptSlot);
+static void cap_frame_print_attrs_impl(word_t super_user, word_t read_write, word_t cache_disabled, word_t xd);
+
+/* use when only have access to pte of frames */
+static void cap_frame_print_attrs_pdpt(pdpte_t *pdptSlot)
+{
+    cap_frame_print_attrs_impl(pdpte_pdpte_1g_ptr_get_super_user(pdptSlot),
+                               pdpte_pdpte_1g_ptr_get_read_write(pdptSlot),
+                               pdpte_pdpte_1g_ptr_get_cache_disabled(pdptSlot),
+                               pdpte_pdpte_1g_ptr_get_xd(pdptSlot));
+}
+static void cap_frame_print_attrs_pd(pde_t *pdSlot)
+{
+    cap_frame_print_attrs_impl(pde_pde_large_ptr_get_super_user(pdSlot),
+                               pde_pde_large_ptr_get_read_write(pdSlot),
+                               pde_pde_large_ptr_get_cache_disabled(pdSlot),
+                               pde_pde_large_ptr_get_xd(pdSlot));
+}
+
+static void cap_frame_print_attrs_pt(pte_t *ptSlot)
+{
+    cap_frame_print_attrs_impl(pte_ptr_get_super_user(ptSlot),
+                               pte_ptr_get_read_write(ptSlot),
+                               pte_ptr_get_cache_disabled(ptSlot),
+                               pte_ptr_get_xd(ptSlot));
+}
+
+static void cap_frame_print_attrs_impl(word_t super_user, word_t read_write, word_t cache_disabled, word_t xd)
+{
+    printf("(");
+
+    /* rights */
+    if (read_write) {
+        printf("RW");
+    } else if (super_user) {
+        printf("R");
+    }
+
+    if (!xd) {
+        printf("X");
+    }
+
+    /* asid, mapping */
+
+    if (cache_disabled) {
+        printf(", uncached");
+    }
+
+    printf(")\n");
+}
+
+static void obj_frame_print_attrs(paddr_t paddr, word_t page_size)
+{
+    printf("(");
+
+    /* VM size */
+    switch (page_size) {
+    case seL4_HugePageBits:
+        printf("1G");
+        break;
+    case seL4_LargePageBits:
+        printf("2M");
+        break;
+    case seL4_PageBits:
+        printf("4k");
+        break;
+    }
+
+    printf(", paddr: 0x%p)\n", (void *)paddr);
+}
+
+static void x86_64_obj_pt_print_slots(pde_t *pdSlot)
+{
+    paddr_t paddr;
+    word_t page_size;
+    pte_t *pt = paddr_to_pptr(pde_pde_pt_ptr_get_pt_base_address(pdSlot));
+
+    for (word_t i = 0; i < BIT(PT_INDEX_OFFSET + PT_INDEX_BITS); i += (1UL << PT_INDEX_OFFSET)) {
+        pte_t *ptSlot = pt + GET_PT_INDEX(i);
+
+        if (pte_ptr_get_present(ptSlot)) {
+            paddr = pte_ptr_get_page_base_address(ptSlot);
+            page_size = seL4_PageBits;
+            printf("frame_%p_%04lu = frame ", ptSlot, GET_PT_INDEX(i));
+            obj_frame_print_attrs(paddr, page_size);
+        }
+    }
+}
+
+static void x86_64_obj_pd_print_slots(pdpte_t *pdptSlot)
+{
+    paddr_t paddr;
+    word_t page_size;
+    pde_t *pd = paddr_to_pptr(pdpte_pdpte_pd_ptr_get_pd_base_address(pdptSlot));
+
+    for (word_t i = 0; i < BIT(PD_INDEX_OFFSET + PD_INDEX_BITS); i += (1UL << PD_INDEX_OFFSET)) {
+        pde_t *pdSlot = pd + GET_PD_INDEX(i);
+
+        if ((pde_ptr_get_page_size(pdSlot) == pde_pde_large) && pde_pde_large_ptr_get_present(pdSlot)) {
+            paddr = pde_pde_large_ptr_get_page_base_address(pdSlot);
+            page_size = seL4_LargePageBits;
+
+            printf("frame_%p_%04lu = frame ", pdSlot, GET_PD_INDEX(i));
+            obj_frame_print_attrs(paddr, page_size);
+
+        } else if (pde_pde_pt_ptr_get_present(pdSlot)) {
+            printf("pt_%p_%04lu = pt\n", pdSlot, GET_PD_INDEX(i));
+            x86_64_obj_pt_print_slots(pdSlot);
+        }
+    }
+}
+
+static void x86_64_obj_pdpt_print_slots(pml4e_t *pml4Slot)
+{
+    paddr_t paddr;
+    word_t page_size;
+    pdpte_t *pdpt = paddr_to_pptr(pml4e_ptr_get_pdpt_base_address(pml4Slot));
+
+    for (word_t i = 0; i < BIT(PDPT_INDEX_OFFSET + PDPT_INDEX_BITS); i += (1UL << PDPT_INDEX_OFFSET)) {
+        pdpte_t *pdptSlot = pdpt + GET_PDPT_INDEX(i);
+
+        if (pdpte_ptr_get_page_size(pdptSlot) == pdpte_pdpte_1g &&
+            pdpte_pdpte_1g_ptr_get_present(pdptSlot)) {
+            paddr = pdpte_pdpte_1g_ptr_get_page_base_address(pdptSlot);
+            page_size = seL4_HugePageBits;
+
+            printf("frame_%p_%04lu = frame ", pdptSlot, GET_PDPT_INDEX(i));
+            obj_frame_print_attrs(paddr, page_size);
+
+        } else if (pdpte_pdpte_pd_ptr_get_present(pdptSlot)) {
+            printf("pd_%p_%04lu = pd\n", pdptSlot, GET_PDPT_INDEX(i));
+            x86_64_obj_pd_print_slots(pdptSlot);
+        }
+    }
+}
+
+static void x86_64_obj_pml4_print_slots(pml4e_t *pml4)
+{
+    for (word_t i = 0; i < BIT(PML4_INDEX_OFFSET + PML4_INDEX_BITS); i += (1UL << PML4_INDEX_OFFSET)) {
+        pml4e_t *pml4Slot = lookupPML4Slot(pml4, i);
+        if (pml4e_ptr_get_present(pml4Slot)) {
+            printf("pdpt_%p_%04lu = pdpt\n", pml4Slot, GET_PML4_INDEX(i));
+            x86_64_obj_pdpt_print_slots(pml4Slot);
+        }
+    }
+}
+
+void obj_tcb_print_vtable(tcb_t *tcb)
+{
+    /* levels: PML4 -> PDPT -> PD -> PT */
+    if (isValidVTableRoot(TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap) && !seen(TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap)) {
+        pml4e_t *pml4 = PML4E_PTR(cap_pml4_cap_get_capPML4BasePtr(TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap));
+        add_to_seen(TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap);
+        printf("%p_pd = pml4\n", pml4);
+        x86_64_obj_pml4_print_slots(pml4);
+    }
+}
+
+/* use when only have access to vptr of frames */
+static void _cap_frame_print_attrs_vptr(word_t vptr, vspace_root_t *vspace)
+{
+    lookupPDPTSlot_ret_t pdptSlot = lookupPDPTSlot(vspace, vptr);
+    lookupPTSlot_ret_t ptSlot;
+    lookupPDSlot_ret_t pdSlot;
+
+    if (pdptSlot.status == EXCEPTION_NONE &&
+        pdpte_ptr_get_page_size(pdptSlot.pdptSlot) == pdpte_pdpte_1g &&
+        pdpte_pdpte_1g_ptr_get_present(pdptSlot.pdptSlot)) {
+        printf("frame_%p_%04lu ", pdptSlot.pdptSlot, GET_PDPT_INDEX(vptr));
+        cap_frame_print_attrs_pdpt(pdptSlot.pdptSlot);
+    } else {
+        pdSlot = lookupPDSlot(vspace, vptr);
+        if (pdSlot.status == EXCEPTION_NONE &&
+            ((pde_ptr_get_page_size(pdSlot.pdSlot) == pde_pde_large) &&
+             pde_pde_large_ptr_get_present(pdSlot.pdSlot))) {
+            printf("frame_%p_%04lu ", pdSlot.pdSlot, GET_PD_INDEX(vptr));
+            cap_frame_print_attrs_pd(pdSlot.pdSlot);
+        } else {
+            ptSlot = lookupPTSlot(vspace, vptr);
+            assert(ptSlot.status == EXCEPTION_NONE && pte_ptr_get_present(ptSlot.ptSlot));
+            printf("frame_%p_%04lu ", ptSlot.ptSlot, GET_PT_INDEX(vptr));
+            cap_frame_print_attrs_pt(ptSlot.ptSlot);
+        }
+    }
+}
+
+static void cap_frame_print_attrs_vptr(word_t vptr, cap_t vspace)
+{
+    asid_t asid = cap_pml4_cap_get_capPML4MappedASID(vspace);
+    findVSpaceForASID_ret_t find_ret = findVSpaceForASID(asid);
+    _cap_frame_print_attrs_vptr(vptr, find_ret.vspace_root);
+}
+
+void print_cap_arch(cap_t cap)
+{
+    switch (cap_get_capType(cap)) {
+    /* arch specific caps */
+    case cap_page_table_cap: {
+        asid_t asid = cap_page_table_cap_get_capPTMappedASID(cap);
+        findVSpaceForASID_ret_t find_ret = findVSpaceForASID(asid);
+        vptr_t vptr = cap_page_table_cap_get_capPTMappedAddress(cap);
+        if (asid) {
+            printf("pt_%p_%04lu (asid: %lu)\n",
+                   lookupPDSlot(find_ret.vspace_root, vptr).pdSlot, GET_PD_INDEX(vptr), (long unsigned int)asid);
+        } else {
+            printf("pt_%p_%04lu\n", lookupPDSlot(find_ret.vspace_root, vptr).pdSlot, GET_PD_INDEX(vptr));
+        }
+        break;
+    }
+    case cap_page_directory_cap: {
+        asid_t asid = cap_page_directory_cap_get_capPDMappedASID(cap);
+        findVSpaceForASID_ret_t find_ret = findVSpaceForASID(asid);
+        vptr_t vptr = cap_page_directory_cap_get_capPDMappedAddress(cap);
+        if (asid) {
+            printf("pd_%p_%04lu (asid: %lu)\n",
+                   lookupPDPTSlot(find_ret.vspace_root, vptr).pdptSlot, GET_PDPT_INDEX(vptr), (long unsigned int)asid);
+        } else {
+            printf("pd_%p_%04lu\n", lookupPDPTSlot(find_ret.vspace_root, vptr).pdptSlot, GET_PDPT_INDEX(vptr));
+        }
+        break;
+    }
+    case cap_pdpt_cap: {
+        asid_t asid = cap_pdpt_cap_get_capPDPTMappedASID(cap);
+        findVSpaceForASID_ret_t find_ret = findVSpaceForASID(asid);
+        vptr_t vptr = cap_pdpt_cap_get_capPDPTMappedAddress(cap);
+        if (asid) {
+            printf("pdpt_%p_%04lu (asid: %lu)\n",
+                   lookupPML4Slot(find_ret.vspace_root, vptr), GET_PML4_INDEX(vptr), (long unsigned int)asid);
+        } else {
+            printf("pdpt_%p_%04lu\n", lookupPML4Slot(find_ret.vspace_root, vptr), GET_PML4_INDEX(vptr));
+        }
+        break;
+    }
+    case cap_pml4_cap: {
+        asid_t asid = cap_pml4_cap_get_capPML4MappedASID(cap);
+        findVSpaceForASID_ret_t find_ret = findVSpaceForASID(asid);
+        if (asid) {
+            printf("%p_pd (asid: %lu)\n",
+                   find_ret.vspace_root, (long unsigned int)asid);
+        } else {
+            printf("%p_pd\n", find_ret.vspace_root);
+        }
+        break;
+    }
+    case cap_asid_control_cap: {
+        /* only one in the system */
+        printf("asid_control\n");
+        break;
+    }
+    case cap_frame_cap: {
+        vptr_t vptr = cap_frame_cap_get_capFMappedAddress(cap);
+        findVSpaceForASID_ret_t find_ret = findVSpaceForASID(cap_frame_cap_get_capFMappedASID(cap));
+        assert(find_ret.status == EXCEPTION_NONE);
+        _cap_frame_print_attrs_vptr(vptr, find_ret.vspace_root);
+        break;
+    }
+    case cap_asid_pool_cap: {
+        printf("%p_asid_pool\n", (void *)cap_asid_pool_cap_get_capASIDPool(cap));
+        break;
+    }
+#ifdef CONFIG_VTX
+    case cap_vcpu_cap: {
+        printf("%p_vcpu\n", (void *)cap_vcpu_cap_get_capVCPUPtr(cap));
+        break;
+    }
+#endif
+    /* X86 specific caps */
+    case cap_io_port_cap: {
+        printf("%p%p_io_port\n", (void *)cap_io_port_cap_get_capIOPortFirstPort(cap),
+               (void *)cap_io_port_cap_get_capIOPortLastPort(cap));
+        break;
+    }
+#ifdef CONFIG_IOMMU
+    case cap_io_space_cap: {
+        printf("%p_io_space\n", (void *)cap_io_space_cap_get_capPCIDevice(cap));
+        break;
+    }
+    case cap_io_page_table_cap: {
+        printf("%p_iopt\n", (void *)cap_io_page_table_cap_get_capIOPTBasePtr(cap));
+        break;
+    }
+#endif
+    default: {
+        printf("[unknown cap %lu]\n", (long unsigned int)cap_get_capType(cap));
+        break;
+    }
+    }
+}
+
+static void obj_asidpool_print_attrs(cap_t asid_cap)
+{
+    asid_t asid = cap_asid_pool_cap_get_capASIDBase(asid_cap);
+    printf("(asid_high: 0x%lx)\n", ASID_HIGH(asid));
+}
+
+void print_object_arch(cap_t cap)
+{
+    switch (cap_get_capType(cap)) {
+    /* arch specific objects */
+    case cap_frame_cap:
+    case cap_page_table_cap:
+    case cap_page_directory_cap:
+    case cap_pdpt_cap:
+    case cap_pml4_cap:
+        /* don't need to deal with these objects since they get handled from vtable */
+        break;
+
+    case cap_asid_pool_cap: {
+        printf("%p_asid_pool = asid_pool ",
+               (void *)cap_asid_pool_cap_get_capASIDPool(cap));
+        obj_asidpool_print_attrs(cap);
+        break;
+    }
+#ifdef CONFIG_VTX
+    case cap_vcpu_cap: {
+        printf("%p_vcpu = vcpu\n", (void *)cap_vcpu_cap_get_capVCPUPtr(cap));
+        break;
+    }
+#endif
+    /* X86 specific caps */
+    case cap_io_port_cap: {
+        printf("%p%p_io_port = io_port ",
+               (void *)cap_io_port_cap_get_capIOPortFirstPort(cap),
+               (void *)cap_io_port_cap_get_capIOPortLastPort(cap));
+        x86_obj_ioports_print_attrs(cap);
+        break;
+    }
+#ifdef CONFIG_IOMMU
+    case cap_io_space_cap: {
+        printf("%p_io_space = io_space ", (void *)cap_io_space_cap_get_capPCIDevice(cap));
+        x86_obj_iospace_print_attrs(cap);
+        break;
+    }
+    case cap_io_page_table_cap: {
+        printf("%p_iopt = iopt ", (void *)cap_io_page_table_cap_get_capIOPTBasePtr(cap));
+        x86_obj_iopt_print_attrs(cap);
+        break;
+    }
+#endif
+    default: {
+        printf("[unknown object %lu]\n", (long unsigned int)cap_get_capType(cap));
+        break;
+    }
+    }
+}
+
+void print_ipc_buffer_slot(tcb_t *tcb)
+{
+    word_t vptr = tcb->tcbIPCBuffer;
+    printf("ipc_buffer_slot: ");
+    cap_frame_print_attrs_vptr(vptr, TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap);
+}
+
+static void x86_64_cap_pt_print_slots(pde_t *pdSlot, vptr_t vptr)
+{
+    pte_t *pt = paddr_to_pptr(pde_pde_pt_ptr_get_pt_base_address(pdSlot));
+    printf("pt_%p_%04lu {\n", pdSlot, GET_PD_INDEX(vptr));
+
+    for (word_t i = 0; i < BIT(PT_INDEX_OFFSET + PT_INDEX_BITS); i += (1UL << PT_INDEX_OFFSET)) {
+        pte_t *ptSlot = pt + GET_PT_INDEX(i);
+
+        if (pte_ptr_get_present(ptSlot)) {
+            printf("0x%lx: frame_%p_%04lu ", GET_PT_INDEX(i), ptSlot, GET_PT_INDEX(i));
+            cap_frame_print_attrs_pt(ptSlot);
+        }
+    }
+    printf("}\n"); /* pt */
+}
+
+static void x86_64_cap_pd_print_slots(pdpte_t *pdptSlot, vptr_t vptr)
+{
+    pde_t *pd = paddr_to_pptr(pdpte_pdpte_pd_ptr_get_pd_base_address(pdptSlot));
+    printf("pd_%p_%04lu {\n", pdptSlot, GET_PDPT_INDEX(vptr));
+
+    for (word_t i = 0; i < BIT(PD_INDEX_OFFSET + PD_INDEX_BITS); i += (1UL << PD_INDEX_OFFSET)) {
+        pde_t *pdSlot = pd + GET_PD_INDEX(i);
+
+        if ((pde_ptr_get_page_size(pdSlot) == pde_pde_large) && pde_pde_large_ptr_get_present(pdSlot)) {
+            printf("0x%lx: frame_%p_%04lu ", GET_PD_INDEX(i), pdSlot, GET_PD_INDEX(i));
+            cap_frame_print_attrs_pd(pdSlot);
+
+        } else if (pde_pde_pt_ptr_get_present(pdSlot)) {
+            printf("0x%lx: pt_%p_%04lu\n", GET_PD_INDEX(i), pdSlot, GET_PD_INDEX(i));
+        }
+    }
+    printf("}\n"); /* pd */
+
+    for (word_t i = 0; i < BIT(PD_INDEX_OFFSET + PD_INDEX_BITS); i += (1UL << PD_INDEX_OFFSET)) {
+        pde_t *pdSlot = pd + GET_PD_INDEX(i);
+        if ((pde_ptr_get_page_size(pdSlot) == pde_pde_pt) && pde_pde_pt_ptr_get_present(pdSlot)) {
+            x86_64_cap_pt_print_slots(pdSlot, i);
+        }
+    }
+}
+
+static void x86_64_cap_pdpt_print_slots(pml4e_t *pml4Slot, vptr_t vptr)
+{
+    pdpte_t *pdpt = paddr_to_pptr(pml4e_ptr_get_pdpt_base_address(pml4Slot));
+
+    printf("pdpt_%p_%04lu {\n", pml4Slot, GET_PML4_INDEX(vptr));
+    for (word_t i = 0; i < BIT(PDPT_INDEX_OFFSET + PDPT_INDEX_BITS); i += (1UL << PDPT_INDEX_OFFSET)) {
+        pdpte_t *pdptSlot = pdpt + GET_PDPT_INDEX(i);
+
+        if (pdpte_ptr_get_page_size(pdptSlot) == pdpte_pdpte_1g &&
+            pdpte_pdpte_1g_ptr_get_present(pdptSlot)) {
+            printf("0x%lx: frame_%p_%04lu ", GET_PDPT_INDEX(i), pdptSlot, GET_PDPT_INDEX(i));
+            cap_frame_print_attrs_pdpt(pdptSlot);
+
+        } else if (pdpte_pdpte_pd_ptr_get_present(pdptSlot)) {
+            printf("0x%lx: pd_%p_%04lu\n", GET_PDPT_INDEX(i), pdptSlot, GET_PDPT_INDEX(i));
+        }
+    }
+    printf("}\n"); /* pdpt */
+
+    for (word_t i = 0; i < BIT(PDPT_INDEX_OFFSET + PDPT_INDEX_BITS); i += (1UL << PDPT_INDEX_OFFSET)) {
+        pdpte_t *pdptSlot = pdpt + GET_PDPT_INDEX(i);
+
+        if (pdpte_ptr_get_page_size(pdptSlot) == pdpte_pdpte_pd && pdpte_pdpte_pd_ptr_get_present(pdptSlot)) {
+            x86_64_cap_pd_print_slots(pdptSlot, i);
+        }
+    }
+}
+
+static void x86_64_cap_pml4_print_slots(pml4e_t *pml4)
+{
+    printf("%p_pd {\n", pml4);
+    for (word_t i = 0; i < BIT(PML4_INDEX_OFFSET + PML4_INDEX_BITS); i += (1UL << PML4_INDEX_OFFSET)) {
+        pml4e_t *pml4Slot = lookupPML4Slot(pml4, i);
+        if (pml4e_ptr_get_present(pml4Slot)) {
+            printf("0x%lx: pdpt_%p_%04lu\n", GET_PML4_INDEX(i), pml4Slot, GET_PML4_INDEX(i));
+        }
+    }
+    printf("}\n"); /* pml4 */
+
+    for (word_t i = 0; i < BIT(PML4_INDEX_OFFSET + PML4_INDEX_BITS); i += (1UL << PML4_INDEX_OFFSET)) {
+        pml4e_t *pml4Slot = lookupPML4Slot(pml4, i);
+        if (pml4e_ptr_get_present(pml4Slot)) {
+            x86_64_cap_pdpt_print_slots(pml4Slot, i);
+        }
+    }
+}
+
+void obj_vtable_print_slots(tcb_t *tcb)
+{
+    /* levels: PML4 -> PDPT -> PD -> PT */
+    if (isValidVTableRoot(TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap) && !seen(TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap)) {
+        pml4e_t *pml4 = PML4E_PTR(cap_pml4_cap_get_capPML4BasePtr(TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap));
+        add_to_seen(TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap);
+        x86_64_cap_pml4_print_slots(pml4);
+    }
+}
+
+#endif /* CONFIG_PRINTING */
+
+void debug_capDL(void)
+{
+    printf("arch x86_64\n");
+    printf("objects {\n");
+    print_objects();
+    printf("}\n");
+
+    printf("caps {\n");
+
+    /* reset the seen list */
+    reset_seen_list();
+
+#ifdef CONFIG_PRINTING
+    print_caps();
+    printf("}\n");
+
+    obj_irq_print_maps();
+#endif
+}
+
+#endif /* CONFIG_DEBUG_BUILD */
+#line 1 "/Users/payas/git/seL4/src/arch/x86/64/machine/registerset.c"
+/*
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ */
+
+#include <assert.h>
 #include <arch/machine/registerset.h>
 #include <machine/fpu.h>
 #include <arch/object/structures.h>
@@ -3047,17 +3635,29 @@ Arch_userStackTrace(tcb_t *tptr)
 const register_t msgRegisters[] = {
     R10, R8, R9, R15
 };
+compile_assert(
+    consistent_message_registers,
+    sizeof(msgRegisters) / sizeof(msgRegisters[0]) == n_msgRegisters
+);
 
 const register_t frameRegisters[] = {
     FaultIP, RSP, FLAGS, RAX, RBX, RCX, RDX, RSI, RDI, RBP,
     R8, R9, R10, R11, R12, R13, R14, R15
 };
+compile_assert(
+    consistent_frame_registers,
+    sizeof(frameRegisters) / sizeof(frameRegisters[0]) == n_frameRegisters
+);
 
 const register_t gpRegisters[] = {
-    TLS_BASE
+    FS_BASE, GS_BASE
 };
+compile_assert(
+    consistent_gp_registers,
+    sizeof(gpRegisters) / sizeof(gpRegisters[0]) == n_gpRegisters
+);
 
-void Mode_initContext(user_context_t* context)
+void Mode_initContext(user_context_t *context)
 {
     context->registers[RAX] = 0;
     context->registers[RBX] = 0;
@@ -3079,7 +3679,7 @@ void Mode_initContext(user_context_t* context)
 
 word_t Mode_sanitiseRegister(register_t reg, word_t v)
 {
-    if (reg == FaultIP || reg == NextIP) {
+    if (reg == FaultIP || reg == NextIP || reg == FS_BASE || reg == GS_BASE) {
         /* ensure instruction address is canonical */
         if (v > 0x00007fffffffffff && v < 0xffff800000000000) {
             /* no way to guess what the user wanted so give them zero */
@@ -3089,16 +3689,17 @@ word_t Mode_sanitiseRegister(register_t reg, word_t v)
     return v;
 }
 
+#ifdef CONFIG_KERNEL_MCS
+word_t getNBSendRecvDest(void)
+{
+    return getRegister(NODE_STATE(ksCurThread), nbsendRecvDest);
+}
+#endif
+#line 1 "/Users/payas/git/seL4/src/arch/x86/64/model/smp.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -3110,8 +3711,7 @@ nodeInfo_t node_info[CONFIG_MAX_NUM_NODES] ALIGN(L1_CACHE_LINE_SIZE) VISIBLE;
 char nodeSkimScratch[CONFIG_MAX_NUM_NODES][sizeof(nodeInfo_t)] ALIGN(L1_CACHE_LINE_SIZE);
 extern char kernel_stack_alloc[CONFIG_MAX_NUM_NODES][BIT(CONFIG_KERNEL_STACK_BITS)];
 
-BOOT_CODE void
-mode_init_tls(cpu_id_t cpu_index)
+BOOT_CODE void mode_init_tls(cpu_id_t cpu_index)
 {
     node_info[cpu_index].stackTop = kernel_stack_alloc[cpu_index + 1];
     node_info[cpu_index].irqStack = &x64KSIRQStack[cpu_index][0];
@@ -3121,20 +3721,14 @@ mode_init_tls(cpu_id_t cpu_index)
 }
 
 #endif /* ENABLE_SMP_SUPPORT */
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/64/model/statedata.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
-#include <arch/x86/arch/model/statedata.h>
+#include <arch/model/statedata.h>
 
 /* The privileged kernel mapping PD & PT */
 pml4e_t x64KSKernelPML4[BIT(PML4_INDEX_BITS)] ALIGN(BIT(seL4_PML4Bits)) VISIBLE;
@@ -3159,17 +3753,11 @@ UP_STATE_DEFINE(cr3_t, x64KSCurrentCR3);
 #endif
 
 word_t x64KSIRQStack[CONFIG_MAX_NUM_NODES][IRQ_STACK_SIZE + 2] ALIGN(64) VISIBLE SKIM_BSS;
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/64/object/objecttype.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -3177,8 +3765,8 @@ word_t x64KSIRQStack[CONFIG_MAX_NUM_NODES][IRQ_STACK_SIZE + 2] ALIGN(64) VISIBLE
 #include <api/failures.h>
 #include <kernel/vspace.h>
 #include <object/structures.h>
-#include <arch/x86/arch/machine.h>
-#include <arch/x86/arch/model/statedata.h>
+#include <arch/machine.h>
+#include <arch/model/statedata.h>
 #include <machine/fpu.h>
 #include <arch/object/objecttype.h>
 #include <arch/object/ioport.h>
@@ -3188,8 +3776,7 @@ word_t x64KSIRQStack[CONFIG_MAX_NUM_NODES][IRQ_STACK_SIZE + 2] ALIGN(64) VISIBLE
 #include <plat/machine/intel-vtd.h>
 
 
-bool_t
-Arch_isFrameType(word_t type)
+bool_t Arch_isFrameType(word_t type)
 {
     switch (type) {
     case seL4_X86_4K:
@@ -3203,8 +3790,7 @@ Arch_isFrameType(word_t type)
     }
 }
 
-deriveCap_ret_t
-Mode_deriveCap(cte_t* slot, cap_t cap)
+deriveCap_ret_t Mode_deriveCap(cte_t *slot, cap_t cap)
 {
     deriveCap_ret_t ret;
 
@@ -3332,8 +3918,7 @@ bool_t CONST Mode_sameRegionAs(cap_t cap_a, cap_t cap_b)
     }
 }
 
-word_t
-Mode_getObjectSize(word_t t)
+word_t Mode_getObjectSize(word_t t)
 {
     switch (t) {
     case seL4_X64_PML4Object:
@@ -3348,8 +3933,7 @@ Mode_getObjectSize(word_t t)
     }
 }
 
-cap_t
-Mode_createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMemory)
+cap_t Mode_createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMemory)
 {
     switch (t) {
 
@@ -3486,15 +4070,14 @@ Mode_createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMe
     }
 }
 
-exception_t
-Mode_decodeInvocation(
+exception_t Mode_decodeInvocation(
     word_t label,
     word_t length,
     cptr_t cptr,
-    cte_t* slot,
+    cte_t *slot,
     cap_t cap,
-    extra_caps_t extraCaps,
-    word_t* buffer
+    bool_t call,
+    word_t *buffer
 )
 {
     switch (cap_get_capType(cap)) {
@@ -3503,7 +4086,7 @@ Mode_decodeInvocation(
     case cap_page_directory_cap:
     case cap_page_table_cap:
     case cap_frame_cap:
-        return decodeX86MMUInvocation(label, length, cptr, slot, cap, extraCaps, buffer);
+        return decodeX86MMUInvocation(label, length, cptr, slot, cap, call, buffer);
 
     default:
         current_syscall_error.type = seL4_InvalidCapability;
@@ -3511,22 +4094,16 @@ Mode_decodeInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/64/smp/ipi.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 #include <mode/smp/ipi.h>
-#include <arch/x86/arch/64/mode/kernel/tlb.h>
+#include <mode/kernel/tlb.h>
 
 #ifdef ENABLE_SMP_SUPPORT
 
@@ -3534,11 +4111,11 @@ void Mode_handleRemoteCall(IpiModeRemoteCall_t call, word_t arg0, word_t arg1, w
 {
     switch (call) {
     case IpiRemoteCall_InvalidatePCID:
-        invalidateLocalPCID(arg0, (void*)arg1, arg2);
+        invalidateLocalPCID(arg0, (void *)arg1, arg2);
         break;
 
     case IpiRemoteCall_InvalidateASID:
-        invalidateLocalASID((vspace_root_t*)arg0, arg1);
+        invalidateLocalASID((vspace_root_t *)arg0, arg1);
         break;
 
     default:
@@ -3547,17 +4124,11 @@ void Mode_handleRemoteCall(IpiModeRemoteCall_t call, word_t arg0, word_t arg1, w
 }
 
 #endif /* ENABLE_SMP_SUPPORT */
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/api/faults.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <types.h>
@@ -3577,8 +4148,7 @@ bool_t Arch_handleFaultReply(tcb_t *receiver, tcb_t *sender, word_t faultType)
     }
 }
 
-word_t
-Arch_setMRs_fault(tcb_t *sender, tcb_t* receiver, word_t *receiveIPCBuffer, word_t faultType)
+word_t Arch_setMRs_fault(tcb_t *sender, tcb_t *receiver, word_t *receiveIPCBuffer, word_t faultType)
 {
     switch (faultType) {
     case seL4_Fault_VMFault: {
@@ -3641,21 +4211,17 @@ word_t handleKernelException(
     printf("\nStack Dump:\n");
     for (i = 0; i < 20; i++) {
         word_t UNUSED stack = sp + i * sizeof(word_t);
-        printf("*0x%lx == 0x%lx\n", stack, *(word_t*)stack);
+        printf("*0x%lx == 0x%lx\n", stack, *(word_t *)stack);
     }
     printf("\nHalting...\n");
     halt();
     UNREACHABLE();
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/benchmark/benchmark.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #if CONFIG_MAX_NUM_TRACE_POINTS > 0
@@ -3671,15 +4237,11 @@ seL4_Word ksLogIndex = 0;
 seL4_Word ksLogIndexFinalized = 0;
 
 #endif /* CONFIG_MAX_NUM_TRACE_POINTS > 0 */
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/c_traps.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -3690,13 +4252,12 @@ seL4_Word ksLogIndexFinalized = 0;
 #include <machine/debug.h>
 #include <arch/object/vcpu.h>
 #include <api/syscall.h>
-#include <arch/api/vmenter.h>
+#include <sel4/arch/vmenter.h>
 
 #include <benchmark/benchmark_track.h>
 #include <benchmark/benchmark_utilisation.h>
 
-void VISIBLE
-c_nested_interrupt(int irq)
+void VISIBLE c_nested_interrupt(int irq)
 {
     /* This is not a real entry point, so we do not grab locks or
      * run c_entry/exit_hooks, since this occurs only if we're already
@@ -3705,8 +4266,7 @@ c_nested_interrupt(int irq)
     ARCH_NODE_STATE(x86KSPendingInterrupt) = irq;
 }
 
-void VISIBLE NORETURN
-c_handle_interrupt(int irq, int syscall)
+void VISIBLE NORETURN c_handle_interrupt(int irq, int syscall)
 {
     /* need to run this first as the NODE_LOCK code might end up as a function call
      * with a return, and we need to make sure returns are not exploitable yet
@@ -3715,7 +4275,7 @@ c_handle_interrupt(int irq, int syscall)
         x86_enable_ibrs();
     }
 
-    /* Only grab the lock if we are not handeling 'int_remote_call_ipi' interrupt
+    /* Only grab the lock if we are not handling 'int_remote_call_ipi' interrupt
      * also flag this lock as IRQ lock if handling the irq interrupts. */
     NODE_LOCK_IF(irq != int_remote_call_ipi,
                  irq >= int_irq_min && irq <= int_irq_max);
@@ -3780,14 +4340,14 @@ c_handle_interrupt(int irq, int syscall)
     UNREACHABLE();
 }
 
-void NORETURN
-slowpath(syscall_t syscall)
+void NORETURN slowpath(syscall_t syscall)
 {
 
 #ifdef CONFIG_VTX
-    if (syscall == SysVMEnter) {
+    if (syscall == SysVMEnter && NODE_STATE(ksCurThread)->tcbArch.tcbVCPU) {
         vcpu_update_state_sysvmenter(NODE_STATE(ksCurThread)->tcbArch.tcbVCPU);
-        if (NODE_STATE(ksCurThread)->tcbBoundNotification && notification_ptr_get_state(NODE_STATE(ksCurThread)->tcbBoundNotification) == NtfnState_Active) {
+        if (NODE_STATE(ksCurThread)->tcbBoundNotification
+            && notification_ptr_get_state(NODE_STATE(ksCurThread)->tcbBoundNotification) == NtfnState_Active) {
             completeSignal(NODE_STATE(ksCurThread)->tcbBoundNotification, NODE_STATE(ksCurThread));
             setRegister(NODE_STATE(ksCurThread), msgInfoRegister, SEL4_VMENTER_RESULT_NOTIF);
             /* Any guest state that we should return is in the same
@@ -3806,6 +4366,9 @@ slowpath(syscall_t syscall)
         ksKernelEntry.path = Entry_UnknownSyscall;
         /* ksKernelEntry.word word is already set to syscall */
 #endif /* TRACK_KERNEL_ENTRIES */
+        /* Contrary to the name, this handles all non-standard syscalls used in
+         * debug builds also.
+         */
         handleUnknownSyscall(syscall);
     } else {
 #ifdef TRACK_KERNEL_ENTRIES
@@ -3818,8 +4381,11 @@ slowpath(syscall_t syscall)
     UNREACHABLE();
 }
 
-void VISIBLE NORETURN
-c_handle_syscall(word_t cptr, word_t msgInfo, syscall_t syscall)
+#ifdef CONFIG_KERNEL_MCS
+void VISIBLE NORETURN c_handle_syscall(word_t cptr, word_t msgInfo, syscall_t syscall, word_t reply)
+#else
+void VISIBLE NORETURN c_handle_syscall(word_t cptr, word_t msgInfo, syscall_t syscall)
+#endif
 {
     /* need to run this first as the NODE_LOCK code might end up as a function call
      * with a return, and we need to make sure returns are not exploitable yet */
@@ -3849,7 +4415,11 @@ c_handle_syscall(word_t cptr, word_t msgInfo, syscall_t syscall)
         fastpath_call(cptr, msgInfo);
         UNREACHABLE();
     } else if (syscall == (syscall_t)SysReplyRecv) {
+#ifdef CONFIG_KERNEL_MCS
+        fastpath_reply_recv(cptr, msgInfo, reply);
+#else
         fastpath_reply_recv(cptr, msgInfo);
+#endif
         UNREACHABLE();
     }
 #endif /* CONFIG_FASTPATH */
@@ -3867,47 +4437,55 @@ void VISIBLE NORETURN c_handle_vmexit(void)
     /* We *always* need to flush the rsb as a guest may have been able to train the rsb with kernel addresses */
     x86_flush_rsb();
 
+    /* When we switched out of VMX mode the FS and GS registers were
+     * clobbered and set to potentially undefined values. we need to
+     * make sure we reload the correct values of FS and GS.
+     * Unfortunately our cached values in x86KSCurrent[FG]SBase now
+     * mismatch what is in the hardware. To force a reload to happen we
+     * set the cached value to something that is guaranteed to not be
+     * the target threads value, ensuring both the cache and the
+     * hardware get updated.
+     *
+     * This needs to happen before the entry hook which will try to
+     * restore the registers without having a means to determine whether
+     * they may have been dirtied by a VM exit. */
+    tcb_t *cur_thread = NODE_STATE(ksCurThread);
+    ARCH_NODE_STATE(x86KSCurrentGSBase) = -(word_t)1;
+    ARCH_NODE_STATE(x86KSCurrentFSBase) = -(word_t)1;
+    x86_load_fsgs_base(cur_thread, CURRENT_CPU_INDEX());
+
     c_entry_hook();
     /* NODE_LOCK will get called in handleVmexit */
     handleVmexit();
-    /* When we switched out of VMX mode the FS and GS registers were clobbered
-     * and set to potentially undefined values. If we are going to switch back
-     * to VMX mode then this is fine, but if we are switching to user mode we
-     * need to make sure we reload the correct values of FS and GS. Unfortunately
-     * our cached values in x86KSCurrent[FG]SBase now mismatch what is in the
-     * hardware. To force a reload to happen we set the cached value to something
-     * that is guaranteed to not be the target threads value, ensuring both
-     * the cache and the hardware get updated */
-    tcb_t *cur_thread = NODE_STATE(ksCurThread);
-    if (thread_state_ptr_get_tsType(&cur_thread->tcbState) != ThreadState_RunningVM) {
-        ARCH_NODE_STATE(x86KSCurrentGSBase) = -(word_t)1;
-        ARCH_NODE_STATE(x86KSCurrentFSBase) = -(word_t)1;
-    }
     restore_user_context();
     UNREACHABLE();
 }
 #endif
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/idle.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 #include <api/debug.h>
 
-void idle_thread(void)
+/*
+ * The idle thread does not have a dedicated stack and runs in
+ * the context of the idle thread TCB. Make sure that the compiler
+ * always eliminates the function prologue by declaring the
+ * idle_thread with the naked attribute.
+ */
+__attribute__((naked)) NORETURN void idle_thread(void)
 {
-    while (1) {
-        asm volatile("hlt");
-    }
+    /* We cannot use for-loop or while-loop here because they may
+     * involve stack manipulations (the compiler will not allow
+     * them in a naked function anyway). */
+    asm volatile(
+        "1: hlt\n"
+        "jmp 1b"
+    );
 }
 
 /** DONT_TRANSLATE */
@@ -3925,27 +4503,26 @@ void VISIBLE halt(void)
     idle_thread();
     UNREACHABLE();
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/kernel/apic.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 #include <machine/io.h>
-#include <arch/x86/arch/machine.h>
+#include <arch/machine.h>
 #include <arch/kernel/apic.h>
 #include <linker.h>
 #include <plat/machine/devices.h>
 #include <plat/machine/pit.h>
 
-static BOOT_CODE uint32_t
-apic_measure_freq(void)
+#define CPUID_TSC_DEADLINE_BIT 24u
+#define APIC_TIMER_MODE_ONE_SHOT 0
+#define APIC_TIMER_MODE_TSC_DEADLINE  2
+
+static BOOT_CODE uint32_t apic_measure_freq(void)
 {
     pit_init();
     /* wait for 1st PIT wraparound */
@@ -3962,8 +4539,7 @@ apic_measure_freq(void)
     return (0xffffffff - apic_read_reg(APIC_TIMER_CURRENT)) / PIT_WRAPAROUND_MS;
 }
 
-BOOT_CODE paddr_t
-apic_get_base_paddr(void)
+BOOT_CODE paddr_t apic_get_base_paddr(void)
 {
     apic_base_msr_t apic_base_msr;
 
@@ -3971,8 +4547,7 @@ apic_get_base_paddr(void)
     return apic_base_msr_get_base_addr(apic_base_msr);
 }
 
-BOOT_CODE bool_t
-apic_init(bool_t mask_legacy_irqs)
+BOOT_CODE bool_t apic_init(bool_t mask_legacy_irqs)
 {
     apic_version_t apic_version;
     uint32_t num_lvt_entries;
@@ -3982,8 +4557,23 @@ apic_init(bool_t mask_legacy_irqs)
         return false;
     }
 
-    apic_khz = apic_measure_freq();
+#ifdef CONFIG_KERNEL_MCS
+    /* find tsc KHz */
+    x86KStscMhz = tsc_init();
 
+    /* can we use tsc deadline mode? */
+    uint32_t cpuid = x86_cpuid_ecx(0x1, 0x0);
+    if (!(cpuid & BIT(CPUID_TSC_DEADLINE_BIT))) {
+        apic_khz = apic_measure_freq();
+        x86KSapicRatio = div64((uint64_t)x86KStscMhz * 1000llu, apic_khz);
+        printf("Apic Khz %lu, TSC Mhz %lu, ratio %lu\n", (long) apic_khz, (long) x86KStscMhz, (long) x86KSapicRatio);
+    } else {
+        // use tsc deadline mode
+        x86KSapicRatio = 0;
+    }
+#else
+    apic_khz = apic_measure_freq();
+#endif
     apic_version.words[0] = apic_read_reg(APIC_VERSION);
 
     /* check for correct version (both APIC and x2APIC): 0x1X */
@@ -3991,6 +4581,13 @@ apic_init(bool_t mask_legacy_irqs)
         printf("APIC: apic_version must be 0x1X\n");
         return false;
     }
+
+#ifdef CONFIG_KERNEL_MCS
+    if (x86KSapicRatio != 0) {
+        /* initialise APIC timer */
+        apic_write_reg(APIC_TIMER_DIVIDE, 0xb); /* divisor = 1 */
+    }
+#endif
 
     /* check for correct number of LVT entries */
     num_lvt_entries = apic_version_get_max_lvt_entry(apic_version) + 1;
@@ -4000,9 +4597,11 @@ apic_init(bool_t mask_legacy_irqs)
         return false;
     }
 
+#ifndef CONFIG_KERNEL_MCS
     /* initialise APIC timer */
     apic_write_reg(APIC_TIMER_DIVIDE, 0xb); /* divisor = 1 */
     apic_write_reg(APIC_TIMER_COUNT, apic_khz * CONFIG_TIMER_TICK_MS);
+#endif
 
     /* enable APIC using SVR register */
     apic_write_reg(
@@ -4045,10 +4644,16 @@ apic_init(bool_t mask_legacy_irqs)
     );
 
     /* initialise timer */
+#ifdef CONFIG_KERNEL_MCS
+    uint32_t timer_mode = x86KSapicRatio == 0 ? APIC_TIMER_MODE_TSC_DEADLINE :
+                          APIC_TIMER_MODE_ONE_SHOT;
+#else
+    uint32_t timer_mode = 1;
+#endif
     apic_write_reg(
         APIC_LVT_TIMER,
         apic_lvt_new(
-            1,        /* timer_mode      */
+            timer_mode,
             0,        /* masked          */
             0,        /* trigger_mode    */
             0,        /* remote_irr      */
@@ -4076,15 +4681,11 @@ void apic_ack_active_interrupt(void)
 {
     apic_write_reg(APIC_EOI, 0);
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/kernel/boot.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -4093,11 +4694,11 @@ void apic_ack_active_interrupt(void)
 #include <model/statedata.h>
 #include <object/interrupt.h>
 #include <arch/object/interrupt.h>
-#include <arch/x86/arch/machine.h>
+#include <arch/machine.h>
 #include <arch/kernel/apic.h>
-#include <arch/x86/arch/kernel/boot.h>
+#include <arch/kernel/boot.h>
 #include <arch/kernel/boot_sys.h>
-#include <arch/x86/arch/kernel/vspace.h>
+#include <arch/kernel/vspace.h>
 #include <machine/fpu.h>
 #include <arch/machine/timer.h>
 #include <arch/object/ioport.h>
@@ -4106,10 +4707,12 @@ void apic_ack_active_interrupt(void)
 
 #include <plat/machine/intel-vtd.h>
 
+#define MAX_RESERVED 1
+BOOT_BSS static region_t reserved[MAX_RESERVED];
+
 /* functions exactly corresponding to abstract specification */
 
-BOOT_CODE static void
-init_irqs(cap_t root_cnode_cap)
+BOOT_CODE static void init_irqs(cap_t root_cnode_cap)
 {
     irq_t i;
 
@@ -4148,187 +4751,30 @@ init_irqs(cap_t root_cnode_cap)
     write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapIRQControl), cap_irq_control_cap_new());
 }
 
-/* The maximum number of reserved regions we have is 1 for each physical memory region (+ MAX_NUM_FREEMEM_REG)
- * plus 1 for each kernel device. For kernel devices we have the ioapics (+ CONFIG_MAX_NUM_IOAPIC),
- * iommus (+ MAX_NUM_DRHU), apic (+ 1) and the reserved MSI region (+ 1) */
-#define NUM_RESERVED_REGIONS    (MAX_NUM_FREEMEM_REG + CONFIG_MAX_NUM_IOAPIC + MAX_NUM_DRHU + 2)
-typedef struct allocated_p_region {
-    p_region_t  regs[NUM_RESERVED_REGIONS];
-    word_t      cur_pos;
-} allocated_p_region_t;
-
-BOOT_BSS static allocated_p_region_t allocated_p_regions;
-
-BOOT_CODE static void
-merge_regions(void)
+BOOT_CODE static bool_t arch_init_freemem(p_region_t ui_p_reg,
+                                          v_region_t it_v_reg,
+                                          mem_p_regs_t *mem_p_regs,
+                                          word_t extra_bi_size_bits)
 {
-    unsigned int i, j;
-    /* Walk through all the regions and see if any can get merged */
-    for (i = 1; i < allocated_p_regions.cur_pos;) {
-        if (allocated_p_regions.regs[i - 1].end == allocated_p_regions.regs[i].start) {
-            /* move this down */
-            allocated_p_regions.regs[i - 1].end = allocated_p_regions.regs[i].end;
-            /* fill the rest down */
-            for (j = i; j < allocated_p_regions.cur_pos - 1; j++) {
-                allocated_p_regions.regs[j] = allocated_p_regions.regs[j + 1];
-            }
-            allocated_p_regions.cur_pos--;
-            /* don't increment 'i' since we want to recheck that the
-             * region we just moved to this slot doesn't also need merging */
-        } else {
-            i++;
-        }
-    }
-}
-
-static UNUSED BOOT_CODE bool_t p_region_overlaps(p_region_t reg)
-{
-    unsigned int i;
-    for (i = 0; i < allocated_p_regions.cur_pos; i++) {
-        if (allocated_p_regions.regs[i].start < reg.end &&
-                allocated_p_regions.regs[i].end > reg.start) {
-            return true;
-        }
-    }
-    return false;
-}
-
-BOOT_CODE bool_t
-add_allocated_p_region(p_region_t reg)
-{
-    unsigned int i, j;
-
-    assert(reg.start <= reg.end);
-    assert(!p_region_overlaps(reg));
-
-    /* Walk the existing regions and see if we can merge with an existing
-     * region, or insert in order */
-    for (i = 0; i < allocated_p_regions.cur_pos; i++) {
-        /* see if we can merge before or after this region */
-        if (allocated_p_regions.regs[i].end == reg.start) {
-            allocated_p_regions.regs[i].end = reg.end;
-            merge_regions();
-            return true;
-        }
-        if (allocated_p_regions.regs[i].start == reg.end) {
-            allocated_p_regions.regs[i].start = reg.start;
-            merge_regions();
-            return true;
-        }
-        /* see if this new one should be inserted before */
-        if (reg.end < allocated_p_regions.regs[i].start) {
-            /* ensure there's space to bump the regions up */
-            if (allocated_p_regions.cur_pos + 1 == NUM_RESERVED_REGIONS) {
-                printf("Ran out of reserved physical regions\n");
-                return false;
-            }
-            /* Copy the regions up to make a gap */
-            for (j = allocated_p_regions.cur_pos; j != i; j--) {
-                allocated_p_regions.regs[j] = allocated_p_regions.regs[j - 1];
-            }
-            /* Put this region in the gap */
-            allocated_p_regions.regs[i] = reg;
-            allocated_p_regions.cur_pos++;
-            return true;
-        }
-    }
-
-    /* nothing else matched, put this one at the end */
-    if (i + 1 == NUM_RESERVED_REGIONS) {
-        printf("Ran out of reserved physical regions\n");
-        return false;
-    }
-    allocated_p_regions.regs[i] = reg;
-    allocated_p_regions.cur_pos = i + 1;
-    return true;
-}
-
-BOOT_CODE void
-init_allocated_p_regions()
-{
-    allocated_p_regions.cur_pos = 0;
-}
-
-BOOT_CODE static bool_t
-create_untypeds(
-    cap_t root_cnode_cap,
-    region_t boot_mem_reuse_reg)
-{
-    seL4_SlotPos     slot_pos_before;
-    seL4_SlotPos     slot_pos_after;
-    word_t      i;
-
-    paddr_t     start = 0;
-
-    slot_pos_before = ndks_boot.slot_pos_cur;
-    create_kernel_untypeds(root_cnode_cap, boot_mem_reuse_reg, slot_pos_before);
-
-    for (i = 0; i < allocated_p_regions.cur_pos; i++) {
-        if (start != allocated_p_regions.regs[i].start) {
-            if (!create_untypeds_for_region(root_cnode_cap, true,
-            paddr_to_pptr_reg((p_region_t) {
-            start, allocated_p_regions.regs[i].start
-            }),
-            slot_pos_before)) {
-                return false;
-            }
-        }
-        start = allocated_p_regions.regs[i].end;
-    }
-
-    if (start != PADDR_USER_DEVICE_TOP) {
-        if (!create_untypeds_for_region(root_cnode_cap, true,
-        paddr_to_pptr_reg((p_region_t) {
-        start, PADDR_USER_DEVICE_TOP
-    }),
-    slot_pos_before)) {
-            return false;
-        }
-    }
-
-    slot_pos_after = ndks_boot.slot_pos_cur;
-    ndks_boot.bi_frame->untyped = (seL4_SlotRegion) {
-        slot_pos_before, slot_pos_after
-    };
-    return true;
-}
-
-BOOT_CODE static void
-init_freemem(p_region_t ui_p_reg, mem_p_regs_t mem_p_regs)
-{
-    word_t i;
-    /* we are guaranteed that we started loading the user image after the kernel
-     * so we only include addresses above ui_info.p_reg.end */
-    pptr_t floor = ui_p_reg.end;
-    for (i = 0; i < MAX_NUM_FREEMEM_REG; i++) {
-        ndks_boot.freemem[i] = REG_EMPTY;
-    }
-    for (i = 0; i < mem_p_regs.count; i++) {
-        pptr_t start = mem_p_regs.list[i].start;
-        pptr_t end = mem_p_regs.list[i].end;
-        if (start < floor) {
-            start = floor;
-        }
-        if (end < floor) {
-            end = floor;
-        }
-        insert_region(paddr_to_pptr_reg((p_region_t) {
-            start, end
-        }));
-    }
+    // Extend the reserved region down to include the base of the kernel image.
+    // KERNEL_ELF_PADDR_BASE is the lowest physical load address used
+    // in the x86 linker script.
+    ui_p_reg.start = KERNEL_ELF_PADDR_BASE;
+    reserved[0] = paddr_to_pptr_reg(ui_p_reg);
+    return init_freemem(mem_p_regs->count, mem_p_regs->list, MAX_RESERVED,
+                        reserved, it_v_reg, extra_bi_size_bits);
 }
 
 /* This function initialises a node's kernel state. It does NOT initialise the CPU. */
 
-BOOT_CODE bool_t
-init_sys_state(
+BOOT_CODE bool_t init_sys_state(
     cpu_id_t      cpu_id,
-    mem_p_regs_t  mem_p_regs,
+    mem_p_regs_t  *mem_p_regs,
     ui_info_t     ui_info,
     p_region_t    boot_mem_reuse_p_reg,
     /* parameters below not modeled in abstract specification */
     uint32_t      num_drhu,
-    paddr_t*      drhu_list,
+    paddr_t      *drhu_list,
     acpi_rmrr_list_t *rmrr_list,
     acpi_rsdp_t      *acpi_rsdp,
     seL4_X86_BootInfo_VBE *vbe,
@@ -4343,9 +4789,7 @@ init_sys_state(
     cap_t         it_vspace_cap;
     cap_t         it_ap_cap;
     cap_t         ipcbuf_cap;
-    pptr_t        bi_frame_pptr;
     word_t        extra_bi_size = sizeof(seL4_BootInfoHeader);
-    region_t      extra_bi_region;
     pptr_t        extra_bi_offset = 0;
     uint32_t      tsc_freq;
     create_frames_of_region_ret_t create_frames_ret;
@@ -4363,7 +4807,7 @@ init_sys_state(
 
     ipcbuf_vptr = ui_v_reg.end;
     bi_frame_vptr = ipcbuf_vptr + BIT(PAGE_BITS);
-    extra_bi_frame_vptr = bi_frame_vptr + BIT(PAGE_BITS);
+    extra_bi_frame_vptr = bi_frame_vptr + BIT(BI_FRAME_SIZE_BITS);
 
     if (vbe->vbeMode != -1) {
         extra_bi_size += sizeof(seL4_X86_BootInfo_VBE);
@@ -4380,12 +4824,22 @@ init_sys_state(
 
     // room for tsc frequency
     extra_bi_size += sizeof(seL4_BootInfoHeader) + 4;
+    word_t extra_bi_size_bits = calculate_extra_bi_size_bits(extra_bi_size);
 
     /* The region of the initial thread is the user image + ipcbuf and boot info */
     it_v_reg.start = ui_v_reg.start;
-    it_v_reg.end = ROUND_UP(extra_bi_frame_vptr + extra_bi_size, PAGE_BITS);
+    it_v_reg.end = ROUND_UP(extra_bi_frame_vptr + BIT(extra_bi_size_bits), PAGE_BITS);
+#ifdef CONFIG_IOMMU
+    /* calculate the number of io pts before initialising memory */
+    if (!vtd_init_num_iopts(num_drhu)) {
+        return false;
+    }
+#endif /* CONFIG_IOMMU */
 
-    init_freemem(ui_info.p_reg, mem_p_regs);
+    if (!arch_init_freemem(ui_info.p_reg, it_v_reg, mem_p_regs, extra_bi_size_bits)) {
+        printf("ERROR: free memory management initialization failed\n");
+        return false;
+    }
 
     /* create the root cnode */
     root_cnode_cap = create_root_cnode();
@@ -4399,32 +4853,23 @@ init_sys_state(
     /* create the cap for managing thread domains */
     create_domain_cap(root_cnode_cap);
 
-    /* create the IRQ CNode */
-    if (!create_irq_cnode()) {
-        return false;
-    }
-
     /* initialise the IRQ states and provide the IRQ control cap */
     init_irqs(root_cnode_cap);
 
     tsc_freq = tsc_init();
 
-    /* create the bootinfo frame */
-    bi_frame_pptr = allocate_bi_frame(0, ksNumCPUs, ipcbuf_vptr);
-    if (!bi_frame_pptr) {
-        return false;
-    }
-
-    extra_bi_region = allocate_extra_bi_region(extra_bi_size);
-    if (extra_bi_region.start == 0) {
-        return false;
-    }
+    /* populate the bootinfo frame */
+    populate_bi_frame(0, ksNumCPUs, ipcbuf_vptr, extra_bi_size);
+    region_t extra_bi_region = {
+        .start = rootserver.extra_bi,
+        .end = rootserver.extra_bi + BIT(extra_bi_size_bits)
+    };
 
     /* populate vbe info block */
     if (vbe->vbeMode != -1) {
         vbe->header.id = SEL4_BOOTINFO_HEADER_X86_VBE;
         vbe->header.len = sizeof(seL4_X86_BootInfo_VBE);
-        memcpy((void*)(extra_bi_region.start + extra_bi_offset), vbe, sizeof(seL4_X86_BootInfo_VBE));
+        memcpy((void *)(rootserver.extra_bi + extra_bi_offset), vbe, sizeof(seL4_X86_BootInfo_VBE));
         extra_bi_offset += sizeof(seL4_X86_BootInfo_VBE);
     }
 
@@ -4433,9 +4878,9 @@ init_sys_state(
         seL4_BootInfoHeader header;
         header.id = SEL4_BOOTINFO_HEADER_X86_ACPI_RSDP;
         header.len = sizeof(header) + sizeof(*acpi_rsdp);
-        *(seL4_BootInfoHeader*)(extra_bi_region.start + extra_bi_offset) = header;
+        *(seL4_BootInfoHeader *)(rootserver.extra_bi + extra_bi_offset) = header;
         extra_bi_offset += sizeof(header);
-        memcpy((void*)(extra_bi_region.start + extra_bi_offset), acpi_rsdp, sizeof(*acpi_rsdp));
+        memcpy((void *)(rootserver.extra_bi + extra_bi_offset), acpi_rsdp, sizeof(*acpi_rsdp));
         extra_bi_offset += sizeof(*acpi_rsdp);
     }
 
@@ -4444,16 +4889,16 @@ init_sys_state(
         seL4_BootInfoHeader header;
         header.id = SEL4_BOOTINFO_HEADER_X86_FRAMEBUFFER;
         header.len = sizeof(header) + sizeof(*fb_info);
-        *(seL4_BootInfoHeader*)(extra_bi_region.start + extra_bi_offset) = header;
+        *(seL4_BootInfoHeader *)(rootserver.extra_bi + extra_bi_offset) = header;
         extra_bi_offset += sizeof(header);
-        memcpy((void*)(extra_bi_region.start + extra_bi_offset), fb_info, sizeof(*fb_info));
+        memcpy((void *)(rootserver.extra_bi + extra_bi_offset), fb_info, sizeof(*fb_info));
         extra_bi_offset += sizeof(*fb_info);
     }
 
     /* populate multiboot mmap block */
     mb_mmap->header.id = SEL4_BOOTINFO_HEADER_X86_MBMMAP;
     mb_mmap->header.len = mb_mmap_size;
-    memcpy((void*)(extra_bi_region.start + extra_bi_offset), mb_mmap, mb_mmap_size);
+    memcpy((void *)(rootserver.extra_bi + extra_bi_offset), mb_mmap, mb_mmap_size);
     extra_bi_offset += mb_mmap_size;
 
     /* populate tsc frequency block */
@@ -4461,9 +4906,9 @@ init_sys_state(
         seL4_BootInfoHeader header;
         header.id = SEL4_BOOTINFO_HEADER_X86_TSC_FREQ;
         header.len = sizeof(header) + 4;
-        *(seL4_BootInfoHeader*)(extra_bi_region.start + extra_bi_offset) = header;
+        *(seL4_BootInfoHeader *)(extra_bi_region.start + extra_bi_offset) = header;
         extra_bi_offset += sizeof(header);
-        *(uint32_t*)(extra_bi_region.start + extra_bi_offset) = tsc_freq;
+        *(uint32_t *)(extra_bi_region.start + extra_bi_offset) = tsc_freq;
         extra_bi_offset += 4;
     }
 
@@ -4471,7 +4916,12 @@ init_sys_state(
     seL4_BootInfoHeader padding_header;
     padding_header.id = SEL4_BOOTINFO_HEADER_PADDING;
     padding_header.len = (extra_bi_region.end - extra_bi_region.start) - extra_bi_offset;
-    *(seL4_BootInfoHeader*)(extra_bi_region.start + extra_bi_offset) = padding_header;
+    *(seL4_BootInfoHeader *)(extra_bi_region.start + extra_bi_offset) = padding_header;
+
+#ifdef CONFIG_KERNEL_MCS
+    /* set up sched control for each core */
+    init_sched_control(root_cnode_cap, CONFIG_MAX_NUM_NODES);
+#endif
 
     /* Construct an initial address space with enough virtual addresses
      * to cover the user image + ipc buffer and bootinfo frames */
@@ -4484,7 +4934,6 @@ init_sys_state(
     create_bi_frame_cap(
         root_cnode_cap,
         it_vspace_cap,
-        bi_frame_pptr,
         bi_frame_vptr
     );
 
@@ -4495,7 +4944,7 @@ init_sys_state(
             it_vspace_cap,
             extra_bi_region,
             true,
-            pptr_to_paddr((void*)(extra_bi_region.start - extra_bi_frame_vptr))
+            pptr_to_paddr((void *)(extra_bi_region.start - extra_bi_frame_vptr))
         );
     if (!extra_bi_ret.success) {
         return false;
@@ -4503,7 +4952,7 @@ init_sys_state(
     ndks_boot.bi_frame->extraBIPages = extra_bi_ret.region;
 
     /* create the initial thread's IPC buffer */
-    ipcbuf_cap = create_ipcbuf_frame(root_cnode_cap, it_vspace_cap, ipcbuf_vptr);
+    ipcbuf_cap = create_ipcbuf_frame_cap(root_cnode_cap, it_vspace_cap, ipcbuf_vptr);
     if (cap_get_capType(ipcbuf_cap) == cap_null_cap) {
         return false;
     }
@@ -4529,10 +4978,12 @@ init_sys_state(
     }
     write_it_asid_pool(it_ap_cap, it_vspace_cap);
 
+#ifdef CONFIG_KERNEL_MCS
+    NODE_STATE(ksCurTime) = getCurrentTime();
+#endif
+
     /* create the idle thread */
-    if (!create_idle_thread()) {
-        return false;
-    }
+    create_idle_thread();
 
     /* create the initial thread */
     tcb_t *initial = create_initial_thread(root_cnode_cap,
@@ -4548,7 +4999,7 @@ init_sys_state(
 
 #ifdef CONFIG_IOMMU
     /* initialise VTD-related data structures and the IOMMUs */
-    if (!vtd_init(cpu_id, num_drhu, rmrr_list)) {
+    if (!vtd_init(cpu_id, rmrr_list)) {
         return false;
     }
 
@@ -4565,7 +5016,6 @@ init_sys_state(
     if (!create_untypeds(root_cnode_cap, boot_mem_reuse_reg)) {
         return false;
     }
-    /* WARNING: alloc_region() must not be called anymore after here! */
 
     /* finalise the bootinfo frame */
     bi_finalise();
@@ -4575,8 +5025,7 @@ init_sys_state(
 
 /* This function initialises the CPU. It does NOT initialise any kernel state. */
 
-BOOT_CODE bool_t
-init_cpu(
+BOOT_CODE bool_t init_cpu(
     bool_t   mask_legacy_irqs
 )
 {
@@ -4617,7 +5066,7 @@ init_cpu(
         }
     }
     if (cpuid_007h_ebx_get_smep(ebx_007)) {
-        /* similar to smap we cannot enable smep if using dangerous code injenction. it
+        /* similar to smap we cannot enable smep if using dangerous code injection. it
          * does not affect stack trace printing though */
         if (!config_set(CONFIG_DANGEROUS_CODE_INJECTION)) {
             write_cr4(read_cr4() | CR4_SMEP);
@@ -4662,35 +5111,32 @@ init_cpu(
 
     return true;
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/kernel/boot_sys.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 #include <util.h>
+#include <hardware.h>
 #include <machine/io.h>
-#include <arch/x86/arch/machine.h>
+#include <arch/machine.h>
 #include <arch/kernel/apic.h>
 #include <arch/kernel/cmdline.h>
-#include <arch/x86/arch/kernel/boot.h>
+#include <arch/kernel/boot.h>
 #include <arch/kernel/boot_sys.h>
 #include <arch/kernel/smp_sys.h>
-#include <arch/x86/arch/kernel/vspace.h>
-#include <arch/x86/arch/kernel/elf.h>
+#include <arch/kernel/vspace.h>
+#include <arch/kernel/elf.h>
 #include <smp/lock.h>
 #include <linker.h>
 #include <plat/machine/acpi.h>
 #include <plat/machine/devices.h>
 #include <plat/machine/pic.h>
 #include <plat/machine/ioapic.h>
-#include <arch/api/bootinfo_types.h>
+#include <sel4/arch/bootinfo_types.h>
 
 /* addresses defined in linker script */
 /* need a fake array to get the pointer from the linker script */
@@ -4704,8 +5150,6 @@ extern char boot_stack_bottom[1];
 extern char boot_stack_top[1];
 
 /* locations in kernel image */
-extern char ki_boot_end[1];
-extern char ki_end[1];
 extern char ki_skim_start[1];
 extern char ki_skim_end[1];
 
@@ -4718,29 +5162,6 @@ extern char _start[1];
 
 #define HIGHMEM_PADDR 0x100000
 
-/* type definitions (directly corresponding to abstract specification) */
-
-typedef struct boot_state {
-    p_region_t   avail_p_reg; /* region of available physical memory on platform */
-    p_region_t   ki_p_reg;    /* region where the kernel image is in */
-    ui_info_t    ui_info;     /* info about userland images */
-    uint32_t     num_ioapic;  /* number of IOAPICs detected */
-    paddr_t      ioapic_paddr[CONFIG_MAX_NUM_IOAPIC];
-    uint32_t     num_drhu; /* number of IOMMUs */
-    paddr_t      drhu_list[MAX_NUM_DRHU]; /* list of physical addresses of the IOMMUs */
-    acpi_rmrr_list_t rmrr_list;
-    acpi_rsdp_t  acpi_rsdp; /* copy of the rsdp */
-    paddr_t      mods_end_paddr; /* physical address where boot modules end */
-    paddr_t      boot_module_start; /* physical address of first boot module */
-    uint32_t     num_cpus;    /* number of detected cpus */
-    uint32_t     mem_lower;   /* lower memory size for boot code of APs to run in real mode */
-    cpu_id_t     cpus[CONFIG_MAX_NUM_NODES];
-    mem_p_regs_t mem_p_regs;  /* physical memory regions */
-    seL4_X86_BootInfo_VBE vbe_info; /* Potential VBE information from multiboot */
-    seL4_X86_BootInfo_mmap_t mb_mmap_info; /* memory map information from multiboot */
-    seL4_X86_BootInfo_fb_t fb_info; /* framebuffer information as set by bootloader */
-} boot_state_t;
-
 BOOT_BSS
 boot_state_t boot_state;
 
@@ -4749,25 +5170,9 @@ boot_state_t boot_state;
 BOOT_BSS
 cmdline_opt_t cmdline_opt;
 
-/* check the module occupies in a contiguous physical memory region */
-BOOT_CODE static bool_t
-module_paddr_region_valid(paddr_t pa_start, paddr_t pa_end)
-{
-    int i = 0;
-    for (i = 0; i < boot_state.mem_p_regs.count; i++) {
-        paddr_t start = boot_state.mem_p_regs.list[i].start;
-        paddr_t end = boot_state.mem_p_regs.list[i].end;
-        if (pa_start >= start && pa_end < end) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /* functions not modeled in abstract specification */
 
-BOOT_CODE static paddr_t
-find_load_paddr(paddr_t min_paddr, word_t image_size)
+BOOT_CODE static paddr_t find_load_paddr(paddr_t min_paddr, word_t image_size)
 {
     int i;
 
@@ -4784,12 +5189,11 @@ find_load_paddr(paddr_t min_paddr, word_t image_size)
     return 0;
 }
 
-BOOT_CODE static paddr_t
-load_boot_module(word_t boot_module_start, paddr_t load_paddr)
+BOOT_CODE static paddr_t load_boot_module(word_t boot_module_start, paddr_t load_paddr)
 {
     v_region_t v_reg;
     word_t entry;
-    Elf_Header_t* elf_file = (Elf_Header_t*)boot_module_start;
+    Elf_Header_t *elf_file = (Elf_Header_t *)boot_module_start;
 
     if (!elf_checkFile(elf_file)) {
         printf("Boot module does not contain a valid ELF image\n");
@@ -4807,16 +5211,16 @@ load_boot_module(word_t boot_module_start, paddr_t load_paddr)
 
     printf("size=0x%lx v_entry=%p v_start=%p v_end=%p ",
            v_reg.end - v_reg.start,
-           (void*)entry,
-           (void*)v_reg.start,
-           (void*)v_reg.end
+           (void *)entry,
+           (void *)v_reg.start,
+           (void *)v_reg.end
           );
 
     if (!IS_ALIGNED(v_reg.start, PAGE_BITS)) {
         printf("Userland image virtual start address must be 4KB-aligned\n");
         return 0;
     }
-    if (v_reg.end + 2 * BIT(PAGE_BITS) > PPTR_USER_TOP) {
+    if (v_reg.end + 2 * BIT(PAGE_BITS) > USER_TOP) {
         /* for IPC buffer frame and bootinfo frame, need 2*4K of additional userland virtual memory */
         printf("Userland image virtual end address too high\n");
         return 0;
@@ -4841,16 +5245,9 @@ load_boot_module(word_t boot_module_start, paddr_t load_paddr)
            boot_state.ui_info.p_reg.end
           );
 
-    if (!module_paddr_region_valid(
-                boot_state.ui_info.p_reg.start,
-                boot_state.ui_info.p_reg.end)) {
-        printf("End of loaded userland image lies outside of usable physical memory\n");
-        return 0;
-    }
-
     /* initialise all initial userland memory and load potentially sparse ELF image */
     memzero(
-        (void*)boot_state.ui_info.p_reg.start,
+        (void *)boot_state.ui_info.p_reg.start,
         boot_state.ui_info.p_reg.end - boot_state.ui_info.p_reg.start
     );
     elf_load(elf_file, boot_state.ui_info.pv_offset);
@@ -4858,17 +5255,16 @@ load_boot_module(word_t boot_module_start, paddr_t load_paddr)
     return load_paddr;
 }
 
-static BOOT_CODE bool_t
-try_boot_sys_node(cpu_id_t cpu_id)
+static BOOT_CODE bool_t try_boot_sys_node(cpu_id_t cpu_id)
 {
     p_region_t boot_mem_reuse_p_reg;
 
     if (!map_kernel_window(
-                boot_state.num_ioapic,
-                boot_state.ioapic_paddr,
-                boot_state.num_drhu,
-                boot_state.drhu_list
-            )) {
+            boot_state.num_ioapic,
+            boot_state.ioapic_paddr,
+            boot_state.num_drhu,
+            boot_state.drhu_list
+        )) {
         return false;
     }
     setCurrentVSpaceRoot(kpptr_to_paddr(X86_KERNEL_VSPACE_ROOT), 0);
@@ -4883,8 +5279,8 @@ try_boot_sys_node(cpu_id_t cpu_id)
 #endif
 
     /* reuse boot code/data memory */
-    boot_mem_reuse_p_reg.start = PADDR_LOAD;
-    boot_mem_reuse_p_reg.end = (paddr_t)ki_boot_end - KERNEL_BASE_OFFSET;
+    boot_mem_reuse_p_reg.start = KERNEL_ELF_PADDR_BASE;
+    boot_mem_reuse_p_reg.end = kpptr_to_paddr(ki_boot_end);
 
     /* initialise the CPU */
     if (!init_cpu(config_set(CONFIG_IRQ_IOAPIC) ? 1 : 0)) {
@@ -4893,35 +5289,33 @@ try_boot_sys_node(cpu_id_t cpu_id)
 
     /* initialise NDKS and kernel heap */
     if (!init_sys_state(
-                cpu_id,
-                boot_state.mem_p_regs,
-                boot_state.ui_info,
-                boot_mem_reuse_p_reg,
-                /* parameters below not modeled in abstract specification */
-                boot_state.num_drhu,
-                boot_state.drhu_list,
-                &boot_state.rmrr_list,
-                &boot_state.acpi_rsdp,
-                &boot_state.vbe_info,
-                &boot_state.mb_mmap_info,
-                &boot_state.fb_info
-            )) {
+            cpu_id,
+            &boot_state.mem_p_regs,
+            boot_state.ui_info,
+            boot_mem_reuse_p_reg,
+            /* parameters below not modeled in abstract specification */
+            boot_state.num_drhu,
+            boot_state.drhu_list,
+            &boot_state.rmrr_list,
+            &boot_state.acpi_rsdp,
+            &boot_state.vbe_info,
+            &boot_state.mb_mmap_info,
+            &boot_state.fb_info
+        )) {
         return false;
     }
 
     return true;
 }
 
-static BOOT_CODE bool_t
-add_mem_p_regs(p_region_t reg)
+static BOOT_CODE bool_t add_mem_p_regs(p_region_t reg)
 {
-    if (reg.end > PADDR_TOP) {
-        reg.end = PADDR_TOP;
-    }
-    if (reg.start > PADDR_TOP) {
-        reg.start = PADDR_TOP;
-    }
     if (reg.start == reg.end) {
+        // Return true here if asked to add an empty region.
+        // Some of the callers round down the end address to
+        return true;
+    }
+    if (reg.end > PADDR_TOP && reg.start > PADDR_TOP) {
         /* Return true here as it's not an error for there to exist memory outside the kernel window,
          * we're just going to ignore it and leave it to be given out as device memory */
         return true;
@@ -4930,18 +5324,22 @@ add_mem_p_regs(p_region_t reg)
         printf("Dropping memory region 0x%lx-0x%lx, try increasing MAX_NUM_FREEMEM_REG\n", reg.start, reg.end);
         return false;
     }
+    if (reg.end > PADDR_TOP) {
+        assert(reg.start <= PADDR_TOP);
+        /* Clamp a region to the top of the kernel window if it extends beyond */
+        reg.end = PADDR_TOP;
+    }
     printf("Adding physical memory region 0x%lx-0x%lx\n", reg.start, reg.end);
     boot_state.mem_p_regs.list[boot_state.mem_p_regs.count] = reg;
     boot_state.mem_p_regs.count++;
-    return add_allocated_p_region(reg);
+    return true;
 }
 
 /*
  * the code relies that the GRUB provides correct information
  * about the actual physical memory regions.
  */
-static BOOT_CODE bool_t
-parse_mem_map(uint32_t mmap_length, uint32_t mmap_addr)
+static BOOT_CODE bool_t parse_mem_map(uint32_t mmap_length, uint32_t mmap_addr)
 {
     multiboot_mmap_t *mmap = (multiboot_mmap_t *)((word_t)mmap_addr);
     printf("Parsing GRUB physical memory map\n");
@@ -4954,10 +5352,11 @@ parse_mem_map(uint32_t mmap_length, uint32_t mmap_addr)
             printf("\tPhysical memory region not addressable\n");
         } else {
             printf("\tPhysical Memory Region from %lx size %lx type %d\n", (long)mem_start, (long)mem_length, type);
-            if (type == MULTIBOOT_MMAP_USEABLE_TYPE && mem_start >= HIGHMEM_PADDR) {
+            if (type == MULTIBOOT_MMAP_USEABLE_TYPE && mem_start >= HIGHMEM_PADDR && mem_length >= BIT(PAGE_BITS)) {
+
                 if (!add_mem_p_regs((p_region_t) {
-                mem_start, mem_start + mem_length
-            })) {
+                ROUND_UP(mem_start, PAGE_BITS), ROUND_DOWN(mem_start + mem_length, PAGE_BITS),
+                })) {
                     return false;
                 }
             }
@@ -4967,31 +5366,31 @@ parse_mem_map(uint32_t mmap_length, uint32_t mmap_addr)
     return true;
 }
 
-static BOOT_CODE bool_t
-is_compiled_for_microarchitecture(void)
+static BOOT_CODE bool_t is_compiled_for_microarchitecture(void)
 {
     word_t microarch_generation = 0;
     x86_cpu_identity_t *model_info = x86_cpuid_get_model_info();
 
-    if (config_set(CONFIG_ARCH_X86_SKYLAKE) ) {
+    if (config_set(CONFIG_ARCH_X86_SKYLAKE)) {
         microarch_generation = 7;
-    } else if (config_set(CONFIG_ARCH_X86_BROADWELL) ) {
+    } else if (config_set(CONFIG_ARCH_X86_BROADWELL)) {
         microarch_generation = 6;
-    } else if (config_set(CONFIG_ARCH_X86_HASWELL) ) {
+    } else if (config_set(CONFIG_ARCH_X86_HASWELL)) {
         microarch_generation = 5;
-    } else if (config_set(CONFIG_ARCH_X86_IVY) ) {
+    } else if (config_set(CONFIG_ARCH_X86_IVY)) {
         microarch_generation = 4;
-    } else if (config_set(CONFIG_ARCH_X86_SANDY) ) {
+    } else if (config_set(CONFIG_ARCH_X86_SANDY)) {
         microarch_generation = 3;
-    } else if (config_set(CONFIG_ARCH_X86_WESTMERE) ) {
+    } else if (config_set(CONFIG_ARCH_X86_WESTMERE)) {
         microarch_generation = 2;
-    } else if (config_set(CONFIG_ARCH_X86_NEHALEM) ) {
+    } else if (config_set(CONFIG_ARCH_X86_NEHALEM)) {
         microarch_generation = 1;
     }
 
     switch (model_info->model) {
     case SKYLAKE_1_MODEL_ID:
     case SKYLAKE_2_MODEL_ID:
+    case SKYLAKE_X_MODEL_ID:
         if (microarch_generation > 7) {
             return false;
         }
@@ -5056,14 +5455,13 @@ is_compiled_for_microarchitecture(void)
     return true;
 }
 
-static BOOT_CODE bool_t
-try_boot_sys(void)
+static BOOT_CODE bool_t try_boot_sys(void)
 {
     paddr_t mods_end_paddr = boot_state.mods_end_paddr;
     p_region_t ui_p_regs;
     paddr_t load_paddr;
 
-    boot_state.ki_p_reg.start = PADDR_LOAD;
+    boot_state.ki_p_reg.start = KERNEL_ELF_PADDR_BASE;
     boot_state.ki_p_reg.end = kpptr_to_paddr(ki_end);
 
     if (!x86_cpuid_initialize()) {
@@ -5089,7 +5487,7 @@ try_boot_sys(void)
             printf("CPU reports not vulnerable to Rogue Data Cache Load (aka Meltdown https://meltdownattack.com) "
                    "yet SKIM window is enabled. Performance is needlessly being impacted, consider disabling.\n");
         } else if (!ia32_arch_capabilities_msr_get_rdcl_no(cap_msr) && !config_set(CONFIG_KERNEL_SKIM_WINDOW)) {
-            printf("CPU reports vulernable to Rogue Data Cache Load (aka Meltdown https://meltdownattack.com) "
+            printf("CPU reports vulnerable to Rogue Data Cache Load (aka Meltdown https://meltdownattack.com) "
                    "yet SKIM window is *not* enabled. Please re-build with SKIM window enabled.");
             return false;
         }
@@ -5101,7 +5499,7 @@ try_boot_sys(void)
                    "consider disabling\n");
         }
         if (!config_set(CONFIG_KERNEL_SKIM_WINDOW) && x86_cpuid_get_identity()->vendor == X86_VENDOR_INTEL) {
-            printf("***WARNING*** SKIM window not enabled, this machine is probably vulernable "
+            printf("***WARNING*** SKIM window not enabled, this machine is probably vulnerable "
                    "to Meltdown (https://www.meltdownattack.com), consider enabling\n");
         }
     }
@@ -5154,7 +5552,8 @@ try_boot_sys(void)
     }
 
     /* query available CPUs from ACPI */
-    boot_state.num_cpus = acpi_madt_scan(&boot_state.acpi_rsdp, boot_state.cpus, &boot_state.num_ioapic, boot_state.ioapic_paddr);
+    boot_state.num_cpus = acpi_madt_scan(&boot_state.acpi_rsdp, boot_state.cpus, &boot_state.num_ioapic,
+                                         boot_state.ioapic_paddr);
     if (boot_state.num_cpus == 0) {
         printf("No CPUs detected\n");
         return false;
@@ -5192,7 +5591,7 @@ try_boot_sys(void)
         ui_p_regs.start,
         ui_p_regs.end - ui_p_regs.start
     );
-    memcpy((void*)ui_p_regs.start, (void*)mods_end_paddr, ui_p_regs.end - ui_p_regs.start);
+    memcpy((void *)ui_p_regs.start, (void *)mods_end_paddr, ui_p_regs.end - ui_p_regs.start);
 
     /* adjust p_reg and pv_offset to final load address */
     boot_state.ui_info.p_reg.start -= mods_end_paddr - ui_p_regs.start;
@@ -5229,13 +5628,12 @@ try_boot_sys(void)
     return true;
 }
 
-static BOOT_CODE bool_t
-try_boot_sys_mbi1(
-    multiboot_info_t* mbi
+static BOOT_CODE bool_t try_boot_sys_mbi1(
+    multiboot_info_t *mbi
 )
 {
     word_t i;
-    multiboot_module_t *modules = (multiboot_module_t*)(word_t)mbi->part1.mod_list;
+    multiboot_module_t *modules = (multiboot_module_t *)(word_t)mbi->part1.mod_list;
 
     cmdline_parse((const char *)(word_t)mbi->part1.cmdline, &cmdline_opt);
 
@@ -5263,7 +5661,7 @@ try_boot_sys_mbi1(
             modules[i].start,
             modules[i].end,
             modules[i].end - modules[i].start,
-            (char *) (long)modules[i].name
+            (char *)(long)modules[i].name
         );
         if ((sword_t)(modules[i].end - modules[i].start) <= 0) {
             printf("Invalid boot module size! Possible cause: boot module file not found by QEMU\n");
@@ -5280,20 +5678,19 @@ try_boot_sys_mbi1(
      * include all the physical memory in the kernel window, but also includes any
      * important or kernel devices. */
     boot_state.mem_p_regs.count = 0;
-    init_allocated_p_regions();
     if (mbi->part1.flags & MULTIBOOT_INFO_MMAP_FLAG) {
         if (!parse_mem_map(mbi->part2.mmap_length, mbi->part2.mmap_addr)) {
             return false;
         }
         uint32_t multiboot_mmap_length = mbi->part2.mmap_length;
         if (multiboot_mmap_length > (SEL4_MULTIBOOT_MAX_MMAP_ENTRIES * sizeof(seL4_X86_mb_mmap_t))) {
-            multiboot_mmap_length = SEL4_MULTIBOOT_MAX_MMAP_ENTRIES * sizeof(seL4_X86_mb_mmap_t);
             printf("Warning: Multiboot has reported more memory map entries, %zd, "
                    "than the max amount that will be passed in the bootinfo, %d. "
                    "These extra regions will still be turned into untyped caps.",
                    multiboot_mmap_length / sizeof(seL4_X86_mb_mmap_t), SEL4_MULTIBOOT_MAX_MMAP_ENTRIES);
+            multiboot_mmap_length = SEL4_MULTIBOOT_MAX_MMAP_ENTRIES * sizeof(seL4_X86_mb_mmap_t);
         }
-        memcpy(&boot_state.mb_mmap_info.mmap, (void*)(word_t)mbi->part2.mmap_addr, multiboot_mmap_length);
+        memcpy(&boot_state.mb_mmap_info.mmap, (void *)(word_t)mbi->part2.mmap_addr, multiboot_mmap_length);
         boot_state.mb_mmap_info.mmap_length = multiboot_mmap_length;
     } else {
         /* calculate memory the old way */
@@ -5310,8 +5707,8 @@ try_boot_sys_mbi1(
         boot_state.vbe_info.vbeMode = -1;
         printf("Multiboot gave us no video information\n");
     } else {
-        boot_state.vbe_info.vbeInfoBlock = *(seL4_VBEInfoBlock_t*)(seL4_Word)mbi->part2.vbe_control_info;
-        boot_state.vbe_info.vbeModeInfoBlock = *(seL4_VBEModeInfoBlock_t*)(seL4_Word)mbi->part2.vbe_mode_info;
+        boot_state.vbe_info.vbeInfoBlock = *(seL4_VBEInfoBlock_t *)(seL4_Word)mbi->part2.vbe_control_info;
+        boot_state.vbe_info.vbeModeInfoBlock = *(seL4_VBEModeInfoBlock_t *)(seL4_Word)mbi->part2.vbe_mode_info;
         boot_state.vbe_info.vbeMode = mbi->part2.vbe_mode;
         printf("Got VBE info in multiboot. Current video mode is %d\n", mbi->part2.vbe_mode);
         boot_state.vbe_info.vbeInterfaceSeg = mbi->part2.vbe_interface_seg;
@@ -5330,14 +5727,13 @@ try_boot_sys_mbi1(
     return true;
 }
 
-static BOOT_CODE bool_t
-try_boot_sys_mbi2(
-    multiboot2_header_t* mbi2
+static BOOT_CODE bool_t try_boot_sys_mbi2(
+    multiboot2_header_t *mbi2
 )
 {
     int mod_count                  = 0;
-    multiboot2_tag_t const * tag   = (multiboot2_tag_t *)(mbi2 + 1);
-    multiboot2_tag_t const * tag_e = (multiboot2_tag_t *)((word_t)mbi2 + mbi2->total_size);
+    multiboot2_tag_t const *tag   = (multiboot2_tag_t *)(mbi2 + 1);
+    multiboot2_tag_t const *tag_e = (multiboot2_tag_t *)((word_t)mbi2 + mbi2->total_size);
 
     /* initialize the memory. We track two kinds of memory regions. Physical memory
      * that we will use for the kernel, and physical memory regions that we must
@@ -5345,7 +5741,6 @@ try_boot_sys_mbi2(
      * include all the physical memory in the kernel window, but also includes any
      * important or kernel devices. */
     boot_state.mem_p_regs.count = 0;
-    init_allocated_p_regions();
     boot_state.mb_mmap_info.mmap_length = 0;
     boot_state.vbe_info.vbeMode = -1;
 
@@ -5353,7 +5748,7 @@ try_boot_sys_mbi2(
         word_t const behind_tag = (word_t)tag + sizeof(*tag);
 
         if (tag->type == MULTIBOOT2_TAG_CMDLINE) {
-            char const * const cmdline = (char const * const)(behind_tag);
+            char const *const cmdline = (char const * const)(behind_tag);
             cmdline_parse(cmdline, &cmdline_opt);
         } else if (tag->type == MULTIBOOT2_TAG_ACPI_1) {
             if (ACPI_V1_SIZE == tag->size - sizeof(*tag)) {
@@ -5364,7 +5759,7 @@ try_boot_sys_mbi2(
                 memcpy(&boot_state.acpi_rsdp, (void *)behind_tag, sizeof(boot_state.acpi_rsdp));
             }
         } else if (tag->type == MULTIBOOT2_TAG_MODULE) {
-            multiboot2_module_t const * module = (multiboot2_module_t const *)behind_tag;
+            multiboot2_module_t const *module = (multiboot2_module_t const *)behind_tag;
             printf(
                 "  module #%d: start=0x%x end=0x%x size=0x%x name='%s'\n",
                 mod_count,
@@ -5387,10 +5782,10 @@ try_boot_sys_mbi2(
                 boot_state.mods_end_paddr = module->end;
             }
         } else if (tag->type == MULTIBOOT2_TAG_MEMORY) {
-            multiboot2_memory_t const * s = (multiboot2_memory_t *)(behind_tag + 8);
-            multiboot2_memory_t const * e = (multiboot2_memory_t *)((word_t)tag + tag->size);
+            multiboot2_memory_t const *s = (multiboot2_memory_t *)(behind_tag + 8);
+            multiboot2_memory_t const *e = (multiboot2_memory_t *)((word_t)tag + tag->size);
 
-            for (multiboot2_memory_t const * m = s; m < e; m++) {
+            for (multiboot2_memory_t const *m = s; m < e; m++) {
                 if (!m->addr) {
                     boot_state.mem_lower = m->size;
                 }
@@ -5408,7 +5803,7 @@ try_boot_sys_mbi2(
                 }
             }
         } else if (tag->type == MULTIBOOT2_TAG_FB) {
-            multiboot2_fb_t const * fb = (multiboot2_fb_t const *)behind_tag;
+            multiboot2_fb_t const *fb = (multiboot2_fb_t const *)behind_tag;
             printf("Got framebuffer info in multiboot2. Current video mode is at physical address=%llx pitch=%u resolution=%ux%u@%u type=%u\n",
                    fb->addr, fb->pitch, fb->width, fb->height, fb->bpp, fb->type);
             boot_state.fb_info = *fb;
@@ -5427,10 +5822,9 @@ try_boot_sys_mbi2(
     return true;
 }
 
-BOOT_CODE VISIBLE void
-boot_sys(
+BOOT_CODE VISIBLE void boot_sys(
     unsigned long multiboot_magic,
-    void* mbi)
+    void *mbi)
 {
     bool_t result = false;
 
@@ -5453,19 +5847,20 @@ boot_sys(
     ARCH_NODE_STATE(x86KScurInterrupt) = int_invalid;
     ARCH_NODE_STATE(x86KSPendingInterrupt) = int_invalid;
 
+#ifdef CONFIG_KERNEL_MCS
+    NODE_STATE(ksCurTime) = getCurrentTime();
+    NODE_STATE(ksConsumed) = 0;
+#endif
+
     schedule();
     activateThread();
 }
 
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/kernel/cmdline.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -5504,7 +5899,8 @@ static int UNUSED parse_opt(const char *cmdline, const char *opt, char *value, i
             break;
         }
 
-        for (optptr = opt; *optptr && *cmdline && (*cmdline != '=') && !is_space(*cmdline) && (*optptr == *cmdline); optptr++, cmdline++);
+        for (optptr = opt; *optptr && *cmdline && (*cmdline != '=') && !is_space(*cmdline)
+             && (*optptr == *cmdline); optptr++, cmdline++);
 
         if (*optptr == '\0' && *cmdline == '=') {
             cmdline++;
@@ -5542,9 +5938,9 @@ static int parse_bool(const char *cmdline, const char *opt)
     }
 }
 
-static void UNUSED parse_uint16_array(char* str, uint16_t* array, int array_size)
+static void UNUSED parse_uint16_array(char *str, uint16_t *array, int array_size)
 {
-    char* last;
+    char *last;
     int   i = 0;
     int   v;
 
@@ -5566,14 +5962,23 @@ static void UNUSED parse_uint16_array(char* str, uint16_t* array, int array_size
     }
 }
 
-void cmdline_parse(const char *cmdline, cmdline_opt_t* cmdline_opt)
+void cmdline_parse(const char *cmdline, cmdline_opt_t *cmdline_opt)
 {
 #if defined(CONFIG_PRINTING) || defined(CONFIG_DEBUG_BUILD)
     /* use BIOS data area to read serial configuration. The BDA is not
      * fully standardized and parts are absolete. See http://wiki.osdev.org/Memory_Map_(x86)#BIOS_Data_Area_.28BDA.29
-     * for an explanation */
-    const unsigned short * bda_port = (unsigned short *)0x400;
-    const unsigned short * bda_equi = (unsigned short *)0x410;
+     * for an explanation
+     */
+    /*
+     * gcc-12 gives array bounds warning (treated as errors by the
+     * build system) for any address below 4096.  Turn that off for
+     * accessing the BIOS area.
+     */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+
+    const unsigned short *bda_port = (unsigned short *)0x400;
+    const unsigned short *bda_equi = (unsigned short *)0x410;
     int const bda_ports_count       = (*bda_equi >> 9) & 0x7;
 #endif
 
@@ -5599,7 +6004,7 @@ void cmdline_parse(const char *cmdline, cmdline_opt_t* cmdline_opt)
     }
 #endif
 
-#ifdef CONFIG_DEBUG_BUILD
+#if defined(CONFIG_PRINTING) || defined(CONFIG_DEBUG_BUILD)
     /* initialise to default or use BDA if available */
     cmdline_opt->debug_port = bda_ports_count && *bda_port ? *bda_port : 0x3f8;
     if (parse_opt(cmdline, "debug_port", cmdline_val, MAX_CMDLINE_VAL_LEN) != -1) {
@@ -5612,22 +6017,17 @@ void cmdline_parse(const char *cmdline, cmdline_opt_t* cmdline_opt)
         x86KSdebugPort = cmdline_opt->debug_port;
         printf("Boot config: debug_port = 0x%x\n", cmdline_opt->debug_port);
     }
+#pragma GCC diagnostic pop
 #endif
 
     cmdline_opt->disable_iommu = parse_bool(cmdline, cmdline_str_disable_iommu);
     printf("Boot config: disable_iommu = %s\n", cmdline_opt->disable_iommu ? "true" : "false");
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/kernel/ept.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -5636,23 +6036,23 @@ void cmdline_parse(const char *cmdline, cmdline_opt_t* cmdline_opt)
 
 #include <model/statedata.h>
 #include <arch/kernel/ept.h>
-#include <build/gen_headers/arch/api/invocation.h>
+#include <arch/api/invocation.h>
 
 struct lookupEPTPDPTSlot_ret {
     exception_t status;
-    ept_pdpte_t* pdptSlot;
+    ept_pdpte_t *pdptSlot;
 };
 typedef struct lookupEPTPDPTSlot_ret lookupEPTPDPTSlot_ret_t;
 
 struct lookupEPTPDSlot_ret {
     exception_t status;
-    ept_pde_t*  pdSlot;
+    ept_pde_t  *pdSlot;
 };
 typedef struct lookupEPTPDSlot_ret lookupEPTPDSlot_ret_t;
 
 struct lookupEPTPTSlot_ret {
     exception_t status;
-    ept_pte_t*  ptSlot;
+    ept_pte_t  *ptSlot;
 };
 typedef struct lookupEPTPTSlot_ret lookupEPTPTSlot_ret_t;
 
@@ -5665,23 +6065,21 @@ enum ept_cache_options {
 };
 typedef enum ept_cache_options ept_cache_options_t;
 
-void
-deleteEPTASID(asid_t asid, ept_pml4e_t *ept)
+void deleteEPTASID(asid_t asid, ept_pml4e_t *ept)
 {
-    asid_pool_t* poolPtr;
+    asid_pool_t *poolPtr;
 
     poolPtr = x86KSASIDTable[asid >> asidLowBits];
     if (poolPtr != NULL) {
         asid_map_t asid_map = poolPtr->array[asid & MASK(asidLowBits)];
         if (asid_map_get_type(asid_map) == asid_map_asid_map_ept &&
-                (ept_pml4e_t*)asid_map_asid_map_ept_get_ept_root(asid_map) == ept) {
+            (ept_pml4e_t *)asid_map_asid_map_ept_get_ept_root(asid_map) == ept) {
             poolPtr->array[asid & MASK(asidLowBits)] = asid_map_asid_map_none_new();
         }
     }
 }
 
-exception_t
-performX86EPTPageInvocationUnmap(cap_t cap, cte_t *ctSlot)
+exception_t performX86EPTPageInvocationUnmap(cap_t cap, cte_t *ctSlot)
 {
     unmapEPTPage(
         cap_frame_cap_get_capFSize(cap),
@@ -5697,8 +6095,7 @@ performX86EPTPageInvocationUnmap(cap_t cap, cte_t *ctSlot)
     return EXCEPTION_NONE;
 }
 
-findEPTForASID_ret_t
-findEPTForASID(asid_t asid)
+findEPTForASID_ret_t findEPTForASID(asid_t asid)
 {
     findEPTForASID_ret_t ret;
     asid_map_t asid_map;
@@ -5712,19 +6109,17 @@ findEPTForASID(asid_t asid)
         return ret;
     }
 
-    ret.ept = (ept_pml4e_t*)asid_map_asid_map_ept_get_ept_root(asid_map);
+    ret.ept = (ept_pml4e_t *)asid_map_asid_map_ept_get_ept_root(asid_map);
     ret.status = EXCEPTION_NONE;
     return ret;
 }
 
-static ept_pml4e_t* CONST
-lookupEPTPML4Slot(ept_pml4e_t *pml4, vptr_t vptr)
+static ept_pml4e_t *CONST lookupEPTPML4Slot(ept_pml4e_t *pml4, vptr_t vptr)
 {
     return pml4 + GET_EPT_PML4_INDEX(vptr);
 }
 
-static lookupEPTPDPTSlot_ret_t CONST
-lookupEPTPDPTSlot(ept_pml4e_t *pml4, vptr_t vptr)
+static lookupEPTPDPTSlot_ret_t CONST lookupEPTPDPTSlot(ept_pml4e_t *pml4, vptr_t vptr)
 {
     lookupEPTPDPTSlot_ret_t ret;
     ept_pml4e_t *pml4Slot;
@@ -5732,7 +6127,7 @@ lookupEPTPDPTSlot(ept_pml4e_t *pml4, vptr_t vptr)
     pml4Slot = lookupEPTPML4Slot(pml4, vptr);
 
     if (!ept_pml4e_ptr_get_read(pml4Slot)) {
-        current_lookup_fault = lookup_fault_missing_capability_new(22);
+        current_lookup_fault = lookup_fault_missing_capability_new(EPT_PML4_INDEX_OFFSET);
 
         ret.pdptSlot = NULL;
         ret.status = EXCEPTION_LOOKUP_FAULT;
@@ -5746,8 +6141,7 @@ lookupEPTPDPTSlot(ept_pml4e_t *pml4, vptr_t vptr)
     return ret;
 }
 
-static lookupEPTPDSlot_ret_t
-lookupEPTPDSlot(ept_pml4e_t* pml4, vptr_t vptr)
+static lookupEPTPDSlot_ret_t lookupEPTPDSlot(ept_pml4e_t *pml4, vptr_t vptr)
 {
     lookupEPTPDSlot_ret_t ret;
     lookupEPTPDPTSlot_ret_t lu_ret;
@@ -5763,7 +6157,7 @@ lookupEPTPDSlot(ept_pml4e_t* pml4, vptr_t vptr)
     }
 
     if (!ept_pdpte_ptr_get_read(lu_ret.pdptSlot)) {
-        current_lookup_fault = lookup_fault_missing_capability_new(22);
+        current_lookup_fault = lookup_fault_missing_capability_new(EPT_PDPT_INDEX_OFFSET);
 
         ret.pdSlot = NULL;
         ret.status = EXCEPTION_LOOKUP_FAULT;
@@ -5777,8 +6171,7 @@ lookupEPTPDSlot(ept_pml4e_t* pml4, vptr_t vptr)
     return ret;
 }
 
-static lookupEPTPTSlot_ret_t
-lookupEPTPTSlot(ept_pml4e_t* pml4, vptr_t vptr)
+static lookupEPTPTSlot_ret_t lookupEPTPTSlot(ept_pml4e_t *pml4, vptr_t vptr)
 {
     lookupEPTPTSlot_ret_t ret;
     lookupEPTPDSlot_ret_t lu_ret;
@@ -5794,8 +6187,8 @@ lookupEPTPTSlot(ept_pml4e_t* pml4, vptr_t vptr)
     }
 
     if ((ept_pde_ptr_get_page_size(lu_ret.pdSlot) != ept_pde_ept_pde_pt) ||
-            !ept_pde_ept_pde_pt_ptr_get_read(lu_ret.pdSlot)) {
-        current_lookup_fault = lookup_fault_missing_capability_new(22);
+        !ept_pde_ept_pde_pt_ptr_get_read(lu_ret.pdSlot)) {
+        current_lookup_fault = lookup_fault_missing_capability_new(EPT_PD_INDEX_OFFSET);
 
         ret.ptSlot = NULL;
         ret.status = EXCEPTION_LOOKUP_FAULT;
@@ -5810,24 +6203,20 @@ lookupEPTPTSlot(ept_pml4e_t* pml4, vptr_t vptr)
     return ret;
 }
 
-static ept_cache_options_t
-eptCacheFromVmAttr(vm_attributes_t vmAttr)
+static ept_cache_options_t eptCacheFromVmAttr(vm_attributes_t vmAttr)
 {
-    /* PAT cache options are 1-1 with ept_cache_options. But need to
-       verify user has specified a sensible option */
+    /* Need to sanitise user input, vmAttr will not have been verified at this point. */
     ept_cache_options_t option = vmAttr.words[0];
-    if (option != EPTUncacheable ||
-            option != EPTWriteCombining ||
-            option != EPTWriteThrough ||
-            option != EPTWriteBack) {
-        /* No failure mode is supported here, vmAttr settings should be verified earlier */
+    if (option != EPTUncacheable &&
+        option != EPTWriteCombining &&
+        option != EPTWriteThrough &&
+        option != EPTWriteBack) {
         option = EPTWriteBack;
     }
     return option;
 }
 
-EPTPDPTMapped_ret_t
-EPTPDPTMapped(asid_t asid, vptr_t vptr, ept_pdpte_t *pdpt)
+EPTPDPTMapped_ret_t EPTPDPTMapped(asid_t asid, vptr_t vptr, ept_pdpte_t *pdpt)
 {
     EPTPDPTMapped_ret_t ret;
     findEPTForASID_ret_t asid_ret;
@@ -5844,7 +6233,7 @@ EPTPDPTMapped(asid_t asid, vptr_t vptr, ept_pdpte_t *pdpt)
     pml4Slot = lookupEPTPML4Slot(asid_ret.ept, vptr);
 
     if (ept_pml4e_ptr_get_read(pml4Slot)
-            && ptrFromPAddr(ept_pml4e_ptr_get_pdpt_base_address(pml4Slot)) == pdpt) {
+        && ptrFromPAddr(ept_pml4e_ptr_get_pdpt_base_address(pml4Slot)) == pdpt) {
         ret.pml4 = asid_ret.ept;
         ret.pml4Slot = pml4Slot;
         ret.status = EXCEPTION_NONE;
@@ -5857,8 +6246,7 @@ EPTPDPTMapped(asid_t asid, vptr_t vptr, ept_pdpte_t *pdpt)
     }
 }
 
-void
-unmapEPTPDPT(asid_t asid, vptr_t vaddr, ept_pdpte_t *pdpt)
+void unmapEPTPDPT(asid_t asid, vptr_t vaddr, ept_pdpte_t *pdpt)
 {
     EPTPDPTMapped_ret_t lu_ret;
 
@@ -5870,11 +6258,10 @@ unmapEPTPDPT(asid_t asid, vptr_t vaddr, ept_pdpte_t *pdpt)
     }
 }
 
-static exception_t
-performEPTPDPTInvocationUnmap(cap_t cap, cte_t *cte)
+static exception_t performEPTPDPTInvocationUnmap(cap_t cap, cte_t *cte)
 {
     if (cap_ept_pdpt_cap_get_capPDPTIsMapped(cap)) {
-        ept_pdpte_t *pdpt = (ept_pdpte_t*)cap_ept_pdpt_cap_get_capPDPTBasePtr(cap);
+        ept_pdpte_t *pdpt = (ept_pdpte_t *)cap_ept_pdpt_cap_get_capPDPTBasePtr(cap);
         unmapEPTPDPT(
             cap_ept_pdpt_cap_get_capPDPTMappedASID(cap),
             cap_ept_pdpt_cap_get_capPDPTMappedAddress(cap),
@@ -5886,8 +6273,8 @@ performEPTPDPTInvocationUnmap(cap_t cap, cte_t *cte)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performEPTPDPTInvocationMap(cap_t cap, cte_t *cte, ept_pml4e_t pml4e, ept_pml4e_t *pml4Slot, ept_pml4e_t *pml4)
+static exception_t performEPTPDPTInvocationMap(cap_t cap, cte_t *cte, ept_pml4e_t pml4e, ept_pml4e_t *pml4Slot,
+                                               ept_pml4e_t *pml4)
 {
     cte->cap = cap;
     *pml4Slot = pml4e;
@@ -5896,24 +6283,22 @@ performEPTPDPTInvocationMap(cap_t cap, cte_t *cte, ept_pml4e_t pml4e, ept_pml4e_
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeX86EPTPDPTInvocation(
+static exception_t decodeX86EPTPDPTInvocation(
     word_t invLabel,
     word_t length,
     cte_t *cte,
     cap_t cap,
-    extra_caps_t excaps,
     word_t *buffer
 )
 {
     word_t          vaddr;
     cap_t           pml4Cap;
-    ept_pml4e_t*    pml4;
+    ept_pml4e_t    *pml4;
     ept_pml4e_t     pml4e;
     paddr_t         paddr;
     asid_t          asid;
     findEPTForASID_ret_t find_ret;
-    ept_pml4e_t*    pml4Slot;
+    ept_pml4e_t    *pml4Slot;
 
     if (invLabel == X86EPTPDPTUnmap) {
         if (!isFinalCapability(cte)) {
@@ -5930,7 +6315,7 @@ decodeX86EPTPDPTInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    if (length < 2 || excaps.excaprefs[0] == NULL) {
+    if (length < 2 || current_extra_caps.excaprefs[0] == NULL) {
         userError("X86EPTPDPTMap: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -5949,7 +6334,7 @@ decodeX86EPTPDPTInvocation(
      * this results in an error shifting by greater than 31 bits, so we manually
      * force a 64-bit variable to do the shifting with */
     vaddr = vaddr & ~(((uint64_t)1 << EPT_PML4_INDEX_OFFSET) - 1);
-    pml4Cap = excaps.excaprefs[0]->cap;
+    pml4Cap = current_extra_caps.excaprefs[0]->cap;
 
     if (cap_get_capType(pml4Cap) != cap_ept_pml4_cap) {
         userError("X86EPTPDPTMap: Not a valid EPT PML4.");
@@ -5959,7 +6344,7 @@ decodeX86EPTPDPTInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    pml4 = (ept_pml4e_t*)cap_ept_pml4_cap_get_capPML4BasePtr(pml4Cap);
+    pml4 = (ept_pml4e_t *)cap_ept_pml4_cap_get_capPML4BasePtr(pml4Cap);
     asid = cap_ept_pml4_cap_get_capPML4MappedASID(pml4Cap);
 
     find_ret = findEPTForASID(asid);
@@ -5985,7 +6370,7 @@ decodeX86EPTPDPTInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    paddr = pptr_to_paddr((void*)cap_ept_pdpt_cap_get_capPDPTBasePtr(cap));
+    paddr = pptr_to_paddr((void *)cap_ept_pdpt_cap_get_capPDPTBasePtr(cap));
     pml4e = ept_pml4e_new(
                 paddr,
                 1,
@@ -6001,31 +6386,28 @@ decodeX86EPTPDPTInvocation(
     return performEPTPDPTInvocationMap(cap, cte, pml4e, pml4Slot, pml4);
 }
 
-exception_t
-decodeX86EPTInvocation(
+exception_t decodeX86EPTInvocation(
     word_t invLabel,
     word_t length,
     cptr_t cptr,
-    cte_t* cte,
+    cte_t *cte,
     cap_t cap,
-    extra_caps_t excaps,
-    word_t* buffer
+    word_t *buffer
 )
 {
     switch (cap_get_capType(cap)) {
     case cap_ept_pdpt_cap:
-        return decodeX86EPTPDPTInvocation(invLabel, length, cte, cap, excaps, buffer);
+        return decodeX86EPTPDPTInvocation(invLabel, length, cte, cap, buffer);
     case cap_ept_pd_cap:
-        return decodeX86EPTPDInvocation(invLabel, length, cte, cap, excaps, buffer);
+        return decodeX86EPTPDInvocation(invLabel, length, cte, cap, buffer);
     case cap_ept_pt_cap:
-        return decodeX86EPTPTInvocation(invLabel, length, cte, cap, excaps, buffer);
+        return decodeX86EPTPTInvocation(invLabel, length, cte, cap, buffer);
     default:
         fail("Invalid cap type");
     }
 }
 
-EPTPageDirectoryMapped_ret_t
-EPTPageDirectoryMapped(asid_t asid, vptr_t vaddr, ept_pde_t *pd)
+EPTPageDirectoryMapped_ret_t EPTPageDirectoryMapped(asid_t asid, vptr_t vaddr, ept_pde_t *pd)
 {
     EPTPageDirectoryMapped_ret_t ret;
     lookupEPTPDPTSlot_ret_t find_ret;
@@ -6048,7 +6430,7 @@ EPTPageDirectoryMapped(asid_t asid, vptr_t vaddr, ept_pde_t *pd)
     }
 
     if (ept_pdpte_ptr_get_read(find_ret.pdptSlot)
-            && ptrFromPAddr(ept_pdpte_ptr_get_pd_base_address(find_ret.pdptSlot)) == pd) {
+        && ptrFromPAddr(ept_pdpte_ptr_get_pd_base_address(find_ret.pdptSlot)) == pd) {
         ret.pml4 = asid_ret.ept;
         ret.pdptSlot = find_ret.pdptSlot;
         ret.status = EXCEPTION_NONE;
@@ -6061,8 +6443,7 @@ EPTPageDirectoryMapped(asid_t asid, vptr_t vaddr, ept_pde_t *pd)
     }
 }
 
-void
-unmapEPTPageDirectory(asid_t asid, vptr_t vaddr, ept_pde_t *pd)
+void unmapEPTPageDirectory(asid_t asid, vptr_t vaddr, ept_pde_t *pd)
 {
     EPTPageDirectoryMapped_ret_t lu_ret;
 
@@ -6080,24 +6461,23 @@ unmapEPTPageDirectory(asid_t asid, vptr_t vaddr, ept_pde_t *pd)
     }
 }
 
-static exception_t
-performEPTPDInvocationUnmap(cap_t cap, cte_t *cte)
+static exception_t performEPTPDInvocationUnmap(cap_t cap, cte_t *cte)
 {
     if (cap_ept_pd_cap_get_capPDIsMapped(cap)) {
-        ept_pde_t *pd = (ept_pde_t*)cap_ept_pd_cap_get_capPDBasePtr(cap);
+        ept_pde_t *pd = (ept_pde_t *)cap_ept_pd_cap_get_capPDBasePtr(cap);
         unmapEPTPageDirectory(
             cap_ept_pd_cap_get_capPDMappedASID(cap),
             cap_ept_pd_cap_get_capPDMappedAddress(cap),
             pd);
-        clearMemory((void*)pd, cap_get_capSizeBits(cap));
+        clearMemory((void *)pd, cap_get_capSizeBits(cap));
     }
     cap_ept_pd_cap_ptr_set_capPDIsMapped(&(cte->cap), 0);
 
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performEPTPDInvocationMap(cap_t cap, cte_t *cte, ept_pdpte_t pdpte, ept_pdpte_t *pdptSlot, ept_pml4e_t *pml4)
+static exception_t performEPTPDInvocationMap(cap_t cap, cte_t *cte, ept_pdpte_t pdpte, ept_pdpte_t *pdptSlot,
+                                             ept_pml4e_t *pml4)
 {
     cte->cap = cap;
     *pdptSlot = pdpte;
@@ -6106,19 +6486,17 @@ performEPTPDInvocationMap(cap_t cap, cte_t *cte, ept_pdpte_t pdpte, ept_pdpte_t 
     return EXCEPTION_NONE;
 }
 
-exception_t
-decodeX86EPTPDInvocation(
+exception_t decodeX86EPTPDInvocation(
     word_t invLabel,
     word_t length,
-    cte_t* cte,
+    cte_t *cte,
     cap_t cap,
-    extra_caps_t excaps,
-    word_t* buffer
+    word_t *buffer
 )
 {
     word_t          vaddr;
     cap_t           pml4Cap;
-    ept_pml4e_t*    pml4;
+    ept_pml4e_t    *pml4;
     ept_pdpte_t     pdpte;
     paddr_t         paddr;
     asid_t          asid;
@@ -6140,7 +6518,7 @@ decodeX86EPTPDInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    if (length < 2 || excaps.excaprefs[0] == NULL) {
+    if (length < 2 || current_extra_caps.excaprefs[0] == NULL) {
         userError("X86EPTPDMap: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -6157,7 +6535,7 @@ decodeX86EPTPDInvocation(
 
     vaddr = getSyscallArg(0, buffer);
     vaddr = vaddr & ~MASK(EPT_PDPT_INDEX_OFFSET);
-    pml4Cap = excaps.excaprefs[0]->cap;
+    pml4Cap = current_extra_caps.excaprefs[0]->cap;
 
     if (cap_get_capType(pml4Cap) != cap_ept_pml4_cap) {
         userError("X86EPTPDMap: Not a valid EPT pml4.");
@@ -6167,7 +6545,7 @@ decodeX86EPTPDInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    pml4 = (ept_pml4e_t*)cap_ept_pml4_cap_get_capPML4BasePtr(pml4Cap);
+    pml4 = (ept_pml4e_t *)cap_ept_pml4_cap_get_capPML4BasePtr(pml4Cap);
     asid = cap_ept_pml4_cap_get_capPML4MappedASID(pml4Cap);
 
     find_ret = findEPTForASID(asid);
@@ -6200,7 +6578,7 @@ decodeX86EPTPDInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    paddr = pptr_to_paddr((void*)(cap_ept_pd_cap_get_capPDBasePtr(cap)));
+    paddr = pptr_to_paddr((void *)(cap_ept_pd_cap_get_capPDBasePtr(cap)));
     pdpte = ept_pdpte_new(
                 paddr,  /* pd_base_address  */
                 0,      /* avl_cte_depth    */
@@ -6217,8 +6595,7 @@ decodeX86EPTPDInvocation(
     return performEPTPDInvocationMap(cap, cte, pdpte, lu_ret.pdptSlot, pml4);
 }
 
-EPTPageTableMapped_ret_t
-EPTPageTableMapped(asid_t asid, vptr_t vaddr, ept_pte_t *pt)
+EPTPageTableMapped_ret_t EPTPageTableMapped(asid_t asid, vptr_t vaddr, ept_pte_t *pt)
 {
     EPTPageTableMapped_ret_t ret;
     lookupEPTPDSlot_ret_t find_ret;
@@ -6241,7 +6618,7 @@ EPTPageTableMapped(asid_t asid, vptr_t vaddr, ept_pte_t *pt)
     }
 
     if (ept_pde_ptr_get_page_size(find_ret.pdSlot) == ept_pde_ept_pde_pt
-            && ptrFromPAddr(ept_pde_ept_pde_pt_ptr_get_pt_base_address(find_ret.pdSlot)) == pt) {
+        && ptrFromPAddr(ept_pde_ept_pde_pt_ptr_get_pt_base_address(find_ret.pdSlot)) == pt) {
         ret.pml4 = asid_ret.ept;
         ret.pdSlot = find_ret.pdSlot;
         ret.status = EXCEPTION_NONE;
@@ -6254,8 +6631,7 @@ EPTPageTableMapped(asid_t asid, vptr_t vaddr, ept_pte_t *pt)
     }
 }
 
-void
-unmapEPTPageTable(asid_t asid, vptr_t vaddr, ept_pte_t *pt)
+void unmapEPTPageTable(asid_t asid, vptr_t vaddr, ept_pte_t *pt)
 {
     EPTPageTableMapped_ret_t lu_ret;
 
@@ -6273,11 +6649,10 @@ unmapEPTPageTable(asid_t asid, vptr_t vaddr, ept_pte_t *pt)
     }
 }
 
-static exception_t
-performEPTPTInvocationUnmap(cap_t cap, cte_t *cte)
+static exception_t performEPTPTInvocationUnmap(cap_t cap, cte_t *cte)
 {
     if (cap_ept_pt_cap_get_capPTIsMapped(cap)) {
-        ept_pte_t *pt = (ept_pte_t*)cap_ept_pt_cap_get_capPTBasePtr(cap);
+        ept_pte_t *pt = (ept_pte_t *)cap_ept_pt_cap_get_capPTBasePtr(cap);
         unmapEPTPageTable(
             cap_ept_pt_cap_get_capPTMappedASID(cap),
             cap_ept_pt_cap_get_capPTMappedAddress(cap),
@@ -6289,8 +6664,7 @@ performEPTPTInvocationUnmap(cap_t cap, cte_t *cte)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performEPTPTInvocationMap(cap_t cap, cte_t *cte, ept_pde_t pde, ept_pde_t *pdSlot, ept_pml4e_t *pml4)
+static exception_t performEPTPTInvocationMap(cap_t cap, cte_t *cte, ept_pde_t pde, ept_pde_t *pdSlot, ept_pml4e_t *pml4)
 {
     cte->cap = cap;
     *pdSlot = pde;
@@ -6299,19 +6673,17 @@ performEPTPTInvocationMap(cap_t cap, cte_t *cte, ept_pde_t pde, ept_pde_t *pdSlo
     return EXCEPTION_NONE;
 }
 
-exception_t
-decodeX86EPTPTInvocation(
+exception_t decodeX86EPTPTInvocation(
     word_t invLabel,
     word_t length,
-    cte_t* cte,
+    cte_t *cte,
     cap_t cap,
-    extra_caps_t excaps,
-    word_t* buffer
+    word_t *buffer
 )
 {
     word_t          vaddr;
     cap_t           pml4Cap;
-    ept_pml4e_t*    pml4;
+    ept_pml4e_t    *pml4;
     ept_pde_t       pde;
     paddr_t         paddr;
     asid_t          asid;
@@ -6333,7 +6705,7 @@ decodeX86EPTPTInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    if (length < 2 || excaps.excaprefs[0] == NULL) {
+    if (length < 2 || current_extra_caps.excaprefs[0] == NULL) {
         userError("X86EPTPT: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -6350,10 +6722,10 @@ decodeX86EPTPTInvocation(
 
     vaddr = getSyscallArg(0, buffer);
     vaddr = vaddr & ~MASK(EPT_PD_INDEX_OFFSET);
-    pml4Cap = excaps.excaprefs[0]->cap;
+    pml4Cap = current_extra_caps.excaprefs[0]->cap;
 
     if (cap_get_capType(pml4Cap) != cap_ept_pml4_cap ||
-            !cap_ept_pml4_cap_get_capPML4IsMapped(pml4Cap)) {
+        !cap_ept_pml4_cap_get_capPML4IsMapped(pml4Cap)) {
         userError("X86EPTPTMap: Not a valid EPT pml4.");
         current_syscall_error.type = seL4_InvalidCapability;
         current_syscall_error.invalidCapNumber = 1;
@@ -6361,7 +6733,7 @@ decodeX86EPTPTInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    pml4 = (ept_pml4e_t*)(cap_ept_pml4_cap_get_capPML4BasePtr(pml4Cap));
+    pml4 = (ept_pml4e_t *)(cap_ept_pml4_cap_get_capPML4BasePtr(pml4Cap));
     asid = cap_ept_pml4_cap_get_capPML4MappedASID(pml4Cap);
 
     find_ret = findEPTForASID(asid);
@@ -6388,15 +6760,15 @@ decodeX86EPTPTInvocation(
     }
 
     if (((ept_pde_ptr_get_page_size(lu_ret.pdSlot) == ept_pde_ept_pde_pt) &&
-            ept_pde_ept_pde_pt_ptr_get_read(lu_ret.pdSlot)) ||
-            ((ept_pde_ptr_get_page_size(lu_ret.pdSlot) == ept_pde_ept_pde_2m) &&
-             ept_pde_ept_pde_2m_ptr_get_read(lu_ret.pdSlot))) {
+         ept_pde_ept_pde_pt_ptr_get_read(lu_ret.pdSlot)) ||
+        ((ept_pde_ptr_get_page_size(lu_ret.pdSlot) == ept_pde_ept_pde_2m) &&
+         ept_pde_ept_pde_2m_ptr_get_read(lu_ret.pdSlot))) {
         userError("X86EPTPTMap: Page table already mapped here");
         current_syscall_error.type = seL4_DeleteFirst;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    paddr = pptr_to_paddr((void*)(cap_ept_pt_cap_get_capPTBasePtr(cap)));
+    paddr = pptr_to_paddr((void *)(cap_ept_pt_cap_get_capPTBasePtr(cap)));
     pde = ept_pde_ept_pde_pt_new(
               paddr,/* pt_base_address  */
               0,    /* avl_cte_depth    */
@@ -6413,8 +6785,7 @@ decodeX86EPTPTInvocation(
     return performEPTPTInvocationMap(cap, cte, pde, lu_ret.pdSlot, pml4);
 }
 
-static exception_t
-performEPTPageMapPTE(cap_t cap, cte_t *cte, ept_pte_t *ptSlot, ept_pte_t pte, ept_pml4e_t *pml4)
+static exception_t performEPTPageMapPTE(cap_t cap, cte_t *cte, ept_pte_t *ptSlot, ept_pte_t pte, ept_pml4e_t *pml4)
 {
     *ptSlot = pte;
     cte->cap = cap;
@@ -6423,8 +6794,8 @@ performEPTPageMapPTE(cap_t cap, cte_t *cte, ept_pte_t *ptSlot, ept_pte_t pte, ep
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performEPTPageMapPDE(cap_t cap, cte_t *cte, ept_pde_t *pdSlot, ept_pde_t pde1, ept_pde_t pde2, ept_pml4e_t *pml4)
+static exception_t performEPTPageMapPDE(cap_t cap, cte_t *cte, ept_pde_t *pdSlot, ept_pde_t pde1, ept_pde_t pde2,
+                                        ept_pml4e_t *pml4)
 {
     pdSlot[0] = pde1;
     if (LARGE_PAGE_BITS == 22) {
@@ -6436,20 +6807,18 @@ performEPTPageMapPDE(cap_t cap, cte_t *cte, ept_pde_t *pdSlot, ept_pde_t pde1, e
     return EXCEPTION_NONE;
 }
 
-exception_t
-decodeX86EPTPageMap(
+exception_t decodeX86EPTPageMap(
     word_t invLabel,
     word_t length,
-    cte_t* cte,
+    cte_t *cte,
     cap_t cap,
-    extra_caps_t excaps,
-    word_t* buffer)
+    word_t *buffer)
 {
     word_t          vaddr;
     word_t          w_rightsMask;
     paddr_t         paddr;
     cap_t           pml4Cap;
-    ept_pml4e_t*    pml4;
+    ept_pml4e_t    *pml4;
     vm_rights_t     capVMRights;
     vm_rights_t     vmRights;
     vm_attributes_t vmAttr;
@@ -6461,7 +6830,7 @@ decodeX86EPTPageMap(
     vaddr = vaddr & ~MASK(EPT_PT_INDEX_OFFSET);
     w_rightsMask = getSyscallArg(1, buffer);
     vmAttr = vmAttributesFromWord(getSyscallArg(2, buffer));
-    pml4Cap = excaps.excaprefs[0]->cap;
+    pml4Cap = current_extra_caps.excaprefs[0]->cap;
 
     capVMRights = cap_frame_cap_get_capFVMRights(cap);
 
@@ -6476,7 +6845,7 @@ decodeX86EPTPageMap(
     assert(cap_frame_cap_get_capFMapType(cap) == X86_MappingNone);
 
     if (cap_get_capType(pml4Cap) != cap_ept_pml4_cap ||
-            !cap_ept_pml4_cap_get_capPML4IsMapped(pml4Cap)) {
+        !cap_ept_pml4_cap_get_capPML4IsMapped(pml4Cap)) {
         userError("X86EPTPageMap: Attempting to map frame into invalid ept pml4.");
         current_syscall_error.type = seL4_InvalidCapability;
         current_syscall_error.invalidCapNumber = 1;
@@ -6484,7 +6853,7 @@ decodeX86EPTPageMap(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    pml4 = (ept_pml4e_t*)(cap_ept_pml4_cap_get_capPML4BasePtr(pml4Cap));
+    pml4 = (ept_pml4e_t *)(cap_ept_pml4_cap_get_capPML4BasePtr(pml4Cap));
     asid = cap_ept_pml4_cap_get_capPML4MappedASID(pml4Cap);
 
     findEPTForASID_ret_t find_ret = findEPTForASID(asid);
@@ -6511,7 +6880,7 @@ decodeX86EPTPageMap(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    paddr = pptr_to_paddr((void*)cap_frame_cap_get_capFBasePtr(cap));
+    paddr = pptr_to_paddr((void *)cap_frame_cap_get_capFBasePtr(cap));
 
     cap = cap_frame_cap_set_capFMappedASID(cap, asid);
     cap = cap_frame_cap_set_capFMappedAddress(cap, vaddr);
@@ -6565,20 +6934,20 @@ decodeX86EPTPageMap(
 
 
         if ((ept_pde_ptr_get_page_size(lu_ret.pdSlot) == ept_pde_ept_pde_pt) &&
-                ept_pde_ept_pde_pt_ptr_get_read(lu_ret.pdSlot)) {
+            ept_pde_ept_pde_pt_ptr_get_read(lu_ret.pdSlot)) {
             userError("X86EPTPageMap: Page table already present.");
             current_syscall_error.type = seL4_DeleteFirst;
             return EXCEPTION_SYSCALL_ERROR;
         }
         if (LARGE_PAGE_BITS != EPT_PD_INDEX_OFFSET &&
-                (ept_pde_ptr_get_page_size(lu_ret.pdSlot + 1) == ept_pde_ept_pde_pt) &&
-                ept_pde_ept_pde_pt_ptr_get_read(lu_ret.pdSlot + 1)) {
+            (ept_pde_ptr_get_page_size(lu_ret.pdSlot + 1) == ept_pde_ept_pde_pt) &&
+            ept_pde_ept_pde_pt_ptr_get_read(lu_ret.pdSlot + 1)) {
             userError("X86EPTPageMap: Page table already present.");
             current_syscall_error.type = seL4_DeleteFirst;
             return EXCEPTION_SYSCALL_ERROR;
         }
         if ((ept_pde_ptr_get_page_size(lu_ret.pdSlot) == ept_pde_ept_pde_2m) &&
-                ept_pde_ept_pde_2m_ptr_get_read(lu_ret.pdSlot)) {
+            ept_pde_ept_pde_2m_ptr_get_read(lu_ret.pdSlot)) {
             userError("X86EPTPageMap: Mapping already present.");
             current_syscall_error.type = seL4_DeleteFirst;
             return EXCEPTION_SYSCALL_ERROR;
@@ -6616,8 +6985,7 @@ decodeX86EPTPageMap(
     }
 }
 
-void
-unmapEPTPage(vm_page_size_t page_size, asid_t asid, vptr_t vptr, void *pptr)
+void unmapEPTPage(vm_page_size_t page_size, asid_t asid, vptr_t vptr, void *pptr)
 {
     findEPTForASID_ret_t find_ret;
     paddr_t addr = addrFromPPtr(pptr);
@@ -6682,21 +7050,16 @@ unmapEPTPage(vm_page_size_t page_size, asid_t asid, vptr_t vptr, void *pptr)
 }
 
 #endif /* CONFIG_VTX */
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/kernel/smp_sys.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
-#include <arch/x86/arch/machine.h>
+#include <arch/machine.h>
+#include <arch/machine/timer.h>
 #include <arch/kernel/boot_sys.h>
 #include <arch/kernel/smp_sys.h>
 #include <smp/lock.h>
@@ -6708,14 +7071,13 @@ BOOT_DATA VISIBLE
 volatile word_t smp_aps_index = 1;
 
 #ifdef CONFIG_USE_LOGICAL_IDS
-BOOT_CODE static void
-update_logical_id_mappings(void)
+BOOT_CODE static void update_logical_id_mappings(void)
 {
     cpu_mapping.index_to_logical_id[getCurrentCPUIndex()] = apic_get_logical_id();
 
     for (int i = 0; i < smp_aps_index; i++) {
         if (apic_get_cluster(cpu_mapping.index_to_logical_id[getCurrentCPUIndex()]) ==
-                apic_get_cluster(cpu_mapping.index_to_logical_id[i])) {
+            apic_get_cluster(cpu_mapping.index_to_logical_id[i])) {
 
             cpu_mapping.other_indexes_in_cluster[getCurrentCPUIndex()] |= BIT(i);
             cpu_mapping.other_indexes_in_cluster[i] |= BIT(getCurrentCPUIndex());
@@ -6724,8 +7086,7 @@ update_logical_id_mappings(void)
 }
 #endif /* CONFIG_USE_LOGICAL_IDS */
 
-BOOT_CODE static void
-start_cpu(cpu_id_t cpu_id, paddr_t boot_fun_paddr)
+BOOT_CODE static void start_cpu(cpu_id_t cpu_id, paddr_t boot_fun_paddr)
 {
     /* memory fence needed before starting the other CPU */
     x86_mfence();
@@ -6735,8 +7096,7 @@ start_cpu(cpu_id_t cpu_id, paddr_t boot_fun_paddr)
     apic_send_startup_ipi(cpu_id, boot_fun_paddr);
 }
 
-BOOT_CODE void
-start_boot_aps(void)
+BOOT_CODE void start_boot_aps(void)
 {
     /* update cpu mapping for BSP, cpus[0] is always assumed to be BSP */
     cpu_mapping.index_to_cpu_id[getCurrentCPUIndex()] = boot_state.cpus[0];
@@ -6758,12 +7118,16 @@ start_boot_aps(void)
         start_cpu(boot_state.cpus[current_ap_index], BOOT_NODE_PADDR);
 
         /* wait for current AP to boot up */
-        while (smp_aps_index == current_ap_index);
+        while (smp_aps_index == current_ap_index) {
+#ifdef ENABLE_SMP_CLOCK_SYNC_TEST_ON_BOOT
+            NODE_STATE(ksCurTime) = getCurrentTime();
+            __atomic_thread_fence(__ATOMIC_ACQ_REL);
+#endif
+        }
     }
 }
 
-BOOT_CODE bool_t
-copy_boot_code_aps(uint32_t mem_lower)
+BOOT_CODE bool_t copy_boot_code_aps(uint32_t mem_lower)
 {
     assert(boot_cpu_end - boot_cpu_start < 0x400);
 
@@ -6785,12 +7149,11 @@ copy_boot_code_aps(uint32_t mem_lower)
     }
 
     /* copy CPU bootup code to lower memory */
-    memcpy((void*)BOOT_NODE_PADDR, boot_cpu_start, boot_size);
+    memcpy((void *)BOOT_NODE_PADDR, boot_cpu_start, boot_size);
     return true;
 }
 
-static BOOT_CODE bool_t
-try_boot_node(void)
+static BOOT_CODE bool_t try_boot_node(void)
 {
     setCurrentVSpaceRoot(kpptr_to_paddr(X86_KERNEL_VSPACE_ROOT), 0);
     /* Sync up the compilers view of the world here to force the PD to actually
@@ -6811,8 +7174,7 @@ try_boot_node(void)
 /* This is the entry function for APs. However, it is not a BOOT_CODE as
  * there is a race between exiting this function and root task running on
  * node #0 to possibly reallocate this memory */
-VISIBLE void
-boot_node(void)
+VISIBLE void boot_node(void)
 {
     bool_t result;
 
@@ -6823,6 +7185,7 @@ boot_node(void)
         fail("boot_node failed for some reason :(\n");
     }
 
+    clock_sync_test();
     smp_aps_index++;
 
     /* grab BKL before leaving the kernel */
@@ -6837,36 +7200,25 @@ boot_node(void)
 }
 
 #endif /* ENABLE_SMP_SUPPORT */
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/kernel/thread.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <kernel/thread.h>
-#include <arch/x86/arch/kernel/thread.h>
+#include <arch/kernel/thread.h>
 
-void
-Arch_postModifyRegisters(tcb_t *tptr)
+void Arch_postModifyRegisters(tcb_t *tptr)
 {
     Mode_postModifyRegisters(tptr);
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/kernel/vspace.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -6874,30 +7226,32 @@ Arch_postModifyRegisters(tcb_t *tptr)
 #include <machine/io.h>
 #include <kernel/boot.h>
 #include <model/statedata.h>
-#include <arch/x86/arch/kernel/vspace.h>
-#include <build/gen_headers/arch/api/invovation.h>
-#include <arch/x86/arch/kernel/tlb_bitmap.h>
-#include <arch/x86/arch/64/mode/kernel/tlb.h>
+#include <arch/kernel/vspace.h>
+#include <arch/api/invocation.h>
+#include <arch/kernel/tlb_bitmap.h>
+#include <mode/kernel/tlb.h>
 #include <mode/kernel/vspace.h>
 
-static exception_t
-performPageGetAddress(void *vbase_ptr)
+static exception_t performPageGetAddress(void *vbase_ptr, bool_t call)
 {
-    paddr_t capFBasePtr;
-
     /* Get the physical address of this frame. */
-    capFBasePtr = pptr_to_paddr(vbase_ptr);
+    paddr_t capFBasePtr;
+    capFBasePtr = addrFromPPtr(vbase_ptr);
 
-    /* return it in the first message register */
-    setRegister(NODE_STATE(ksCurThread), msgRegisters[0], capFBasePtr);
-    setRegister(NODE_STATE(ksCurThread), msgInfoRegister,
-                wordFromMessageInfo(seL4_MessageInfo_new(0, 0, 0, 1)));
-
+    tcb_t *thread;
+    thread = NODE_STATE(ksCurThread);
+    if (call) {
+        word_t *ipcBuffer = lookupIPCBuffer(true, thread);
+        setRegister(thread, badgeRegister, 0);
+        unsigned int length = setMR(thread, ipcBuffer, 0, capFBasePtr);
+        setRegister(thread, msgInfoRegister, wordFromMessageInfo(
+                        seL4_MessageInfo_new(0, 0, 0, length)));
+    }
+    setThreadState(NODE_STATE(ksCurThread), ThreadState_Running);
     return EXCEPTION_NONE;
 }
 
-
-void deleteASIDPool(asid_t asid_base, asid_pool_t* pool)
+void deleteASIDPool(asid_t asid_base, asid_pool_t *pool)
 {
     /* Haskell error: "ASID pool's base must be aligned" */
     assert(IS_ALIGNED(asid_base, asidLowBits));
@@ -6906,7 +7260,7 @@ void deleteASIDPool(asid_t asid_base, asid_pool_t* pool)
         for (unsigned int offset = 0; offset < BIT(asidLowBits); offset++) {
             asid_map_t asid_map = pool->array[offset];
             if (asid_map_get_type(asid_map) == asid_map_asid_map_vspace) {
-                vspace_root_t *vspace = (vspace_root_t*)asid_map_asid_map_vspace_get_vspace_root(asid_map);
+                vspace_root_t *vspace = (vspace_root_t *)asid_map_asid_map_vspace_get_vspace_root(asid_map);
                 hwASIDInvalidate(asid_base + offset, vspace);
             }
         }
@@ -6915,7 +7269,7 @@ void deleteASIDPool(asid_t asid_base, asid_pool_t* pool)
     }
 }
 
-exception_t performASIDControlInvocation(void* frame, cte_t* slot, cte_t* parent, asid_t asid_base)
+exception_t performASIDControlInvocation(void *frame, cte_t *slot, cte_t *parent, asid_t asid_base)
 {
     /** AUXUPD: "(True, typ_region_bytes (ptr_val \<acute>frame) 12)" */
     /** GHOSTUPD: "(True, gs_clear_region (ptr_val \<acute>frame) 12)" */
@@ -6935,20 +7289,20 @@ exception_t performASIDControlInvocation(void* frame, cte_t* slot, cte_t* parent
     );
     /* Haskell error: "ASID pool's base must be aligned" */
     assert((asid_base & MASK(asidLowBits)) == 0);
-    x86KSASIDTable[asid_base >> asidLowBits] = (asid_pool_t*)frame;
+    x86KSASIDTable[asid_base >> asidLowBits] = (asid_pool_t *)frame;
 
     return EXCEPTION_NONE;
 }
 
 void deleteASID(asid_t asid, vspace_root_t *vspace)
 {
-    asid_pool_t* poolPtr;
+    asid_pool_t *poolPtr;
 
     poolPtr = x86KSASIDTable[asid >> asidLowBits];
     if (poolPtr != NULL) {
         asid_map_t asid_map = poolPtr->array[asid & MASK(asidLowBits)];
         if (asid_map_get_type(asid_map) == asid_map_asid_map_vspace &&
-                (vspace_root_t*)asid_map_asid_map_vspace_get_vspace_root(asid_map) == vspace) {
+            (vspace_root_t *)asid_map_asid_map_vspace_get_vspace_root(asid_map) == vspace) {
             hwASIDInvalidate(asid, vspace);
             poolPtr->array[asid & MASK(asidLowBits)] = asid_map_asid_map_none_new();
             setVMRoot(NODE_STATE(ksCurThread));
@@ -6956,7 +7310,7 @@ void deleteASID(asid_t asid, vspace_root_t *vspace)
     }
 }
 
-word_t* PURE lookupIPCBuffer(bool_t isReceiver, tcb_t *thread)
+word_t *PURE lookupIPCBuffer(bool_t isReceiver, tcb_t *thread)
 {
     word_t      w_bufferPtr;
     cap_t       bufferCap;
@@ -6990,9 +7344,10 @@ bool_t CONST isValidVTableRoot(cap_t cap)
 }
 
 
-BOOT_CODE bool_t map_kernel_window_devices(pte_t *pt, uint32_t num_ioapic, paddr_t* ioapic_paddrs, uint32_t num_drhu, paddr_t* drhu_list)
+BOOT_CODE bool_t map_kernel_window_devices(pte_t *pt, uint32_t num_ioapic, paddr_t *ioapic_paddrs, uint32_t num_drhu,
+                                           paddr_t *drhu_list)
 {
-    word_t idx = (PPTR_KDEV & MASK(LARGE_PAGE_BITS)) >> PAGE_BITS;
+    word_t idx = (KDEV_BASE & MASK(LARGE_PAGE_BITS)) >> PAGE_BITS;
     paddr_t phys;
     pte_t pte;
     unsigned int i;
@@ -7001,7 +7356,7 @@ BOOT_CODE bool_t map_kernel_window_devices(pte_t *pt, uint32_t num_ioapic, paddr
     if (!phys) {
         return false;
     }
-    if (!add_allocated_p_region((p_region_t) {
+    if (!reserve_region((p_region_t) {
     phys, phys + 0x1000
 })) {
         return false;
@@ -7013,13 +7368,13 @@ BOOT_CODE bool_t map_kernel_window_devices(pte_t *pt, uint32_t num_ioapic, paddr
     idx++;
     for (i = 0; i < num_ioapic; i++) {
         phys = ioapic_paddrs[i];
-        if (!add_allocated_p_region((p_region_t) {
+        if (!reserve_region((p_region_t) {
         phys, phys + 0x1000
     })) {
             return false;
         }
         pte = x86_make_device_pte(phys);
-        assert(idx == ( (PPTR_IOAPIC_START + i * BIT(PAGE_BITS)) & MASK(LARGE_PAGE_BITS)) >> PAGE_BITS);
+        assert(idx == ((PPTR_IOAPIC_START + i * BIT(PAGE_BITS)) & MASK(LARGE_PAGE_BITS)) >> PAGE_BITS);
         pt[idx] = pte;
         idx++;
         if (idx == BIT(PT_INDEX_BITS)) {
@@ -7029,7 +7384,7 @@ BOOT_CODE bool_t map_kernel_window_devices(pte_t *pt, uint32_t num_ioapic, paddr
     /* put in null mappings for any extra IOAPICs */
     for (; i < CONFIG_MAX_NUM_IOAPIC; i++) {
         pte = x86_make_empty_pte();
-        assert(idx == ( (PPTR_IOAPIC_START + i * BIT(PAGE_BITS)) & MASK(LARGE_PAGE_BITS)) >> PAGE_BITS);
+        assert(idx == ((PPTR_IOAPIC_START + i * BIT(PAGE_BITS)) & MASK(LARGE_PAGE_BITS)) >> PAGE_BITS);
         pt[idx] = pte;
         idx++;
     }
@@ -7037,7 +7392,7 @@ BOOT_CODE bool_t map_kernel_window_devices(pte_t *pt, uint32_t num_ioapic, paddr
     /* map kernel devices: IOMMUs */
     for (i = 0; i < num_drhu; i++) {
         phys = (paddr_t)drhu_list[i];
-        if (!add_allocated_p_region((p_region_t) {
+        if (!reserve_region((p_region_t) {
         phys, phys + 0x1000
     })) {
             return false;
@@ -7064,8 +7419,7 @@ BOOT_CODE bool_t map_kernel_window_devices(pte_t *pt, uint32_t num_ioapic, paddr
     return true;
 }
 
-BOOT_CODE static void
-init_idt(idt_entry_t* idt)
+BOOT_CODE static void init_idt(idt_entry_t *idt)
 {
     init_idt_entry(idt, 0x00, int_00);
     init_idt_entry(idt, 0x01, int_01);
@@ -7340,8 +7694,7 @@ init_idt(idt_entry_t* idt)
     init_idt_entry(idt, 0xff, int_ff);
 }
 
-BOOT_CODE bool_t
-init_vm_state(void)
+BOOT_CODE bool_t init_vm_state(void)
 {
     word_t cacheLineSize;
     x86KScacheLineSizeBits = getCacheLineSizeBits();
@@ -7356,19 +7709,23 @@ init_vm_state(void)
         SMP_COND_STATEMENT(return false);
     }
 
-    init_tss(&x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.tss);
-    init_gdt(x86KSGlobalState[CURRENT_CPU_INDEX()].x86KSgdt, &x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.tss);
+    /*
+     * Work around -Waddress-of-packed-member. TSS is the first thing
+     * in the struct and so it's safe to take its address.
+     */
+    void *tss_ptr = &x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.tss;
+    init_tss(tss_ptr);
+    init_gdt(x86KSGlobalState[CURRENT_CPU_INDEX()].x86KSgdt, tss_ptr);
     init_idt(x86KSGlobalState[CURRENT_CPU_INDEX()].x86KSidt);
     return true;
 }
 
-BOOT_CODE bool_t
-init_pat_msr(void)
+BOOT_CODE bool_t init_pat_msr(void)
 {
     x86_pat_msr_t pat_msr;
     /* First verify PAT is supported by the machine.
      *      See section 11.12.1 of Volume 3 of the Intel manual */
-    if ( (x86_cpuid_edx(0x1, 0x0) & BIT(16)) == 0) {
+    if ((x86_cpuid_edx(0x1, 0x0) & BIT(16)) == 0) {
         printf("PAT support not found\n");
         return false;
     }
@@ -7386,18 +7743,16 @@ init_pat_msr(void)
     return true;
 }
 
-BOOT_CODE void
-write_it_asid_pool(cap_t it_ap_cap, cap_t it_vspace_cap)
+BOOT_CODE void write_it_asid_pool(cap_t it_ap_cap, cap_t it_vspace_cap)
 {
-    asid_pool_t* ap = ASID_POOL_PTR(pptr_of_cap(it_ap_cap));
+    asid_pool_t *ap = ASID_POOL_PTR(pptr_of_cap(it_ap_cap));
     ap->array[IT_ASID] = asid_map_asid_map_vspace_new(pptr_of_cap(it_vspace_cap));
     x86KSASIDTable[IT_ASID >> asidLowBits] = ap;
 }
 
-asid_map_t
-findMapForASID(asid_t asid)
+asid_map_t findMapForASID(asid_t asid)
 {
-    asid_pool_t*        poolPtr;
+    asid_pool_t        *poolPtr;
 
     poolPtr = x86KSASIDTable[asid >> asidLowBits];
     if (!poolPtr) {
@@ -7421,12 +7776,12 @@ findVSpaceForASID_ret_t findVSpaceForASID(asid_t asid)
         return ret;
     }
 
-    ret.vspace_root = (vspace_root_t*)asid_map_asid_map_vspace_get_vspace_root(asid_map);
+    ret.vspace_root = (vspace_root_t *)asid_map_asid_map_vspace_get_vspace_root(asid_map);
     ret.status = EXCEPTION_NONE;
     return ret;
 }
 
-exception_t handleVMFault(tcb_t* thread, vm_fault_type_t vm_faultType)
+exception_t handleVMFault(tcb_t *thread, vm_fault_type_t vm_faultType)
 {
     word_t addr;
     uint32_t fault;
@@ -7490,14 +7845,14 @@ lookupPTSlot_ret_t lookupPTSlot(vspace_root_t *vspace, vptr_t vptr)
         return ret;
     }
     if ((pde_ptr_get_page_size(pdSlot.pdSlot) != pde_pde_pt) ||
-            !pde_pde_pt_ptr_get_present(pdSlot.pdSlot)) {
+        !pde_pde_pt_ptr_get_present(pdSlot.pdSlot)) {
         current_lookup_fault = lookup_fault_missing_capability_new(PAGE_BITS + PT_INDEX_BITS);
         ret.ptSlot = NULL;
         ret.status = EXCEPTION_LOOKUP_FAULT;
         return ret;
     } else {
-        pte_t* pt;
-        pte_t* ptSlot;
+        pte_t *pt;
+        pte_t *ptSlot;
         word_t ptIndex;
 
         pt = paddr_to_pptr(pde_pde_pt_ptr_get_pt_base_address(pdSlot.pdSlot));
@@ -7547,7 +7902,7 @@ vm_rights_t CONST maskVMRights(vm_rights_t vm_rights, seL4_CapRights_t cap_right
     return VMKernelOnly;
 }
 
-void flushTable(vspace_root_t *vspace, word_t vptr, pte_t* pt, asid_t asid)
+void flushTable(vspace_root_t *vspace, word_t vptr, pte_t *pt, asid_t asid)
 {
     word_t i;
     cap_t        threadRoot;
@@ -7559,7 +7914,8 @@ void flushTable(vspace_root_t *vspace, word_t vptr, pte_t* pt, asid_t asid)
     /* find valid mappings */
     for (i = 0; i < BIT(PT_INDEX_BITS); i++) {
         if (pte_get_present(pt[i])) {
-            if (config_set(CONFIG_SUPPORT_PCID) || (isValidNativeRoot(threadRoot) && (vspace_root_t*)pptr_of_cap(threadRoot) == vspace)) {
+            if (config_set(CONFIG_SUPPORT_PCID) || (isValidNativeRoot(threadRoot)
+                                                    && (vspace_root_t *)pptr_of_cap(threadRoot) == vspace)) {
                 invalidateTranslationSingleASID(vptr + (i << PAGE_BITS), asid,
                                                 SMP_TERNARY(tlb_bitmap_get(vspace), 0));
             }
@@ -7572,7 +7928,6 @@ void unmapPage(vm_page_size_t page_size, asid_t asid, vptr_t vptr, void *pptr)
 {
     findVSpaceForASID_ret_t find_ret;
     lookupPTSlot_ret_t  lu_ret;
-    cap_t               threadRoot;
     lookupPDSlot_ret_t  pd_ret;
     pde_t               *pde;
 
@@ -7587,9 +7942,9 @@ void unmapPage(vm_page_size_t page_size, asid_t asid, vptr_t vptr, void *pptr)
         if (lu_ret.status != EXCEPTION_NONE) {
             return;
         }
-        if (! (pte_ptr_get_present(lu_ret.ptSlot)
-                && (pte_ptr_get_page_base_address(lu_ret.ptSlot)
-                    == pptr_to_paddr(pptr)))) {
+        if (!(pte_ptr_get_present(lu_ret.ptSlot)
+              && (pte_ptr_get_page_base_address(lu_ret.ptSlot)
+                  == pptr_to_paddr(pptr)))) {
             return;
         }
         *lu_ret.ptSlot = makeUserPTEInvalid();
@@ -7601,10 +7956,10 @@ void unmapPage(vm_page_size_t page_size, asid_t asid, vptr_t vptr, void *pptr)
             return;
         }
         pde = pd_ret.pdSlot;
-        if (! (pde_ptr_get_page_size(pde) == pde_pde_large
-                && pde_pde_large_ptr_get_present(pde)
-                && (pde_pde_large_ptr_get_page_base_address(pde)
-                    == pptr_to_paddr(pptr)))) {
+        if (!(pde_ptr_get_page_size(pde) == pde_pde_large
+              && pde_pde_large_ptr_get_present(pde)
+              && (pde_pde_large_ptr_get_page_base_address(pde)
+                  == pptr_to_paddr(pptr)))) {
             return;
         }
         *pde = makeUserPDEInvalid();
@@ -7617,15 +7972,11 @@ void unmapPage(vm_page_size_t page_size, asid_t asid, vptr_t vptr, void *pptr)
         break;
     }
 
-    /* check if page belongs to current address space */
-    threadRoot = TCB_PTR_CTE_PTR(NODE_STATE(ksCurThread), tcbVTable)->cap;
-    if (config_set(CONFIG_SUPPORT_PCID) || (isValidNativeRoot(threadRoot) && (vspace_root_t*)pptr_of_cap(threadRoot) == find_ret.vspace_root)) {
-        invalidateTranslationSingleASID(vptr, asid,
-                                        SMP_TERNARY(tlb_bitmap_get(find_ret.vspace_root), 0));
-    }
+    invalidateTranslationSingleASID(vptr, asid,
+                                    SMP_TERNARY(tlb_bitmap_get(find_ret.vspace_root), 0));
 }
 
-void unmapPageTable(asid_t asid, vptr_t vaddr, pte_t* pt)
+void unmapPageTable(asid_t asid, vptr_t vaddr, pte_t *pt)
 {
     findVSpaceForASID_ret_t find_ret;
     lookupPDSlot_ret_t    lu_ret;
@@ -7641,9 +7992,9 @@ void unmapPageTable(asid_t asid, vptr_t vaddr, pte_t* pt)
     }
 
     /* check if the PD actually refers to the PT */
-    if (! (pde_ptr_get_page_size(lu_ret.pdSlot) == pde_pde_pt &&
-            pde_pde_pt_ptr_get_present(lu_ret.pdSlot) &&
-            (pde_pde_pt_ptr_get_pt_base_address(lu_ret.pdSlot) == pptr_to_paddr(pt)))) {
+    if (!(pde_ptr_get_page_size(lu_ret.pdSlot) == pde_pde_pt &&
+          pde_pde_pt_ptr_get_present(lu_ret.pdSlot) &&
+          (pde_pde_pt_ptr_get_pt_base_address(lu_ret.pdSlot) == pptr_to_paddr(pt)))) {
         return;
     }
 
@@ -7655,8 +8006,8 @@ void unmapPageTable(asid_t asid, vptr_t vaddr, pte_t* pt)
                                      SMP_TERNARY(tlb_bitmap_get(find_ret.vspace_root), 0));
 }
 
-static exception_t
-performX86PageInvocationMapPTE(cap_t cap, cte_t *ctSlot, pte_t *ptSlot, pte_t pte, vspace_root_t *vspace)
+static exception_t performX86PageInvocationMapPTE(cap_t cap, cte_t *ctSlot, pte_t *ptSlot, pte_t pte,
+                                                  vspace_root_t *vspace)
 {
     ctSlot->cap = cap;
     *ptSlot = pte;
@@ -7665,8 +8016,8 @@ performX86PageInvocationMapPTE(cap_t cap, cte_t *ctSlot, pte_t *ptSlot, pte_t pt
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performX86PageInvocationMapPDE(cap_t cap, cte_t *ctSlot, pde_t *pdSlot, pde_t pde, vspace_root_t *vspace)
+static exception_t performX86PageInvocationMapPDE(cap_t cap, cte_t *ctSlot, pde_t *pdSlot, pde_t pde,
+                                                  vspace_root_t *vspace)
 {
     ctSlot->cap = cap;
     *pdSlot = pde;
@@ -7675,26 +8026,8 @@ performX86PageInvocationMapPDE(cap_t cap, cte_t *ctSlot, pde_t *pdSlot, pde_t pd
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performX86PageInvocationRemapPTE(pte_t *ptSlot, pte_t pte, asid_t asid, vspace_root_t *vspace)
-{
-    *ptSlot = pte;
-    invalidatePageStructureCacheASID(pptr_to_paddr(vspace), asid,
-                                     SMP_TERNARY(tlb_bitmap_get(vspace), 0));
-    return EXCEPTION_NONE;
-}
 
-static exception_t
-performX86PageInvocationRemapPDE(pde_t *pdSlot, pde_t pde, asid_t asid, vspace_root_t *vspace)
-{
-    *pdSlot = pde;
-    invalidatePageStructureCacheASID(pptr_to_paddr(vspace), asid,
-                                     SMP_TERNARY(tlb_bitmap_get(vspace), 0));
-    return EXCEPTION_NONE;
-}
-
-static exception_t
-performX86PageInvocationUnmap(cap_t cap, cte_t *ctSlot)
+static exception_t performX86PageInvocationUnmap(cap_t cap, cte_t *ctSlot)
 {
     assert(cap_frame_cap_get_capFMappedASID(cap));
     assert(cap_frame_cap_get_capFMapType(cap) == X86_MappingVSpace);
@@ -7717,8 +8050,7 @@ performX86PageInvocationUnmap(cap_t cap, cte_t *ctSlot)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performX86FrameInvocationUnmap(cap_t cap, cte_t *cte)
+static exception_t performX86FrameInvocationUnmap(cap_t cap, cte_t *cte)
 {
     if (cap_frame_cap_get_capFMappedASID(cap) != asidInvalid) {
         switch (cap_frame_cap_get_capFMapType(cap)) {
@@ -7748,9 +8080,9 @@ struct create_mapping_pte_return {
 };
 typedef struct create_mapping_pte_return create_mapping_pte_return_t;
 
-static create_mapping_pte_return_t
-createSafeMappingEntries_PTE(paddr_t base, word_t vaddr, vm_rights_t vmRights, vm_attributes_t attr,
-                             vspace_root_t *vspace)
+static create_mapping_pte_return_t createSafeMappingEntries_PTE(paddr_t base, word_t vaddr, vm_rights_t vmRights,
+                                                                vm_attributes_t attr,
+                                                                vspace_root_t *vspace)
 {
     create_mapping_pte_return_t ret;
     lookupPTSlot_ret_t          lu_ret;
@@ -7777,9 +8109,9 @@ struct create_mapping_pde_return {
 };
 typedef struct create_mapping_pde_return create_mapping_pde_return_t;
 
-static create_mapping_pde_return_t
-createSafeMappingEntries_PDE(paddr_t base, word_t vaddr, vm_rights_t vmRights, vm_attributes_t attr,
-                             vspace_root_t *vspace)
+static create_mapping_pde_return_t createSafeMappingEntries_PDE(paddr_t base, word_t vaddr, vm_rights_t vmRights,
+                                                                vm_attributes_t attr,
+                                                                vspace_root_t *vspace)
 {
     create_mapping_pde_return_t ret;
     lookupPDSlot_ret_t          lu_ret;
@@ -7796,7 +8128,7 @@ createSafeMappingEntries_PDE(paddr_t base, word_t vaddr, vm_rights_t vmRights, v
 
     /* check for existing page table */
     if ((pde_ptr_get_page_size(ret.pdSlot) == pde_pde_pt) &&
-            (pde_pde_pt_ptr_get_present(ret.pdSlot))) {
+        (pde_pde_pt_ptr_get_present(ret.pdSlot))) {
         current_syscall_error.type = seL4_DeleteFirst;
         ret.status = EXCEPTION_SYSCALL_ERROR;
         return ret;
@@ -7812,10 +8144,10 @@ createSafeMappingEntries_PDE(paddr_t base, word_t vaddr, vm_rights_t vmRights, v
 exception_t decodeX86FrameInvocation(
     word_t invLabel,
     word_t length,
-    cte_t* cte,
+    cte_t *cte,
     cap_t cap,
-    extra_caps_t excaps,
-    word_t* buffer
+    bool_t call,
+    word_t *buffer
 )
 {
     switch (invLabel) {
@@ -7825,14 +8157,14 @@ exception_t decodeX86FrameInvocation(
         word_t          w_rightsMask;
         paddr_t         paddr;
         cap_t           vspaceCap;
-        vspace_root_t*  vspace;
+        vspace_root_t  *vspace;
         vm_rights_t     capVMRights;
         vm_rights_t     vmRights;
         vm_attributes_t vmAttr;
         vm_page_size_t  frameSize;
         asid_t          asid;
 
-        if (length < 3 || excaps.excaprefs[0] == NULL) {
+        if (length < 3 || current_extra_caps.excaprefs[0] == NULL) {
             current_syscall_error.type = seL4_TruncatedMessage;
 
             return EXCEPTION_SYSCALL_ERROR;
@@ -7842,19 +8174,9 @@ exception_t decodeX86FrameInvocation(
         vaddr = getSyscallArg(0, buffer);
         w_rightsMask = getSyscallArg(1, buffer);
         vmAttr = vmAttributesFromWord(getSyscallArg(2, buffer));
-        vspaceCap = excaps.excaprefs[0]->cap;
+        vspaceCap = current_extra_caps.excaprefs[0]->cap;
 
         capVMRights = cap_frame_cap_get_capFVMRights(cap);
-
-        if (cap_frame_cap_get_capFMappedASID(cap) != asidInvalid) {
-            userError("X86FrameMap: Frame already mapped.");
-            current_syscall_error.type = seL4_InvalidCapability;
-            current_syscall_error.invalidCapNumber = 0;
-
-            return EXCEPTION_SYSCALL_ERROR;
-        }
-
-        assert(cap_frame_cap_get_capFMapType(cap) == X86_MappingNone);
 
         if (!isValidNativeRoot(vspaceCap)) {
             userError("X86FrameMap: Attempting to map frame into invalid page directory cap.");
@@ -7863,8 +8185,43 @@ exception_t decodeX86FrameInvocation(
 
             return EXCEPTION_SYSCALL_ERROR;
         }
-        vspace = (vspace_root_t*)pptr_of_cap(vspaceCap);
+        vspace = (vspace_root_t *)pptr_of_cap(vspaceCap);
         asid = cap_get_capMappedASID(vspaceCap);
+
+        if (cap_frame_cap_get_capFMappedASID(cap) != asidInvalid) {
+            if (cap_frame_cap_get_capFMappedASID(cap) != asid) {
+                current_syscall_error.type = seL4_InvalidCapability;
+                current_syscall_error.invalidCapNumber = 1;
+
+                return EXCEPTION_SYSCALL_ERROR;
+            }
+
+            if (cap_frame_cap_get_capFMapType(cap) != X86_MappingVSpace) {
+                userError("X86Frame: Attempting to remap frame with different mapping type");
+                current_syscall_error.type = seL4_IllegalOperation;
+
+                return EXCEPTION_SYSCALL_ERROR;
+            }
+
+            if (cap_frame_cap_get_capFMappedAddress(cap) != vaddr) {
+                userError("X86Frame: Attempting to map frame into multiple addresses");
+                current_syscall_error.type = seL4_InvalidArgument;
+                current_syscall_error.invalidArgumentNumber = 0;
+
+                return EXCEPTION_SYSCALL_ERROR;
+            }
+        } else {
+            vtop = vaddr + BIT(pageBitsForSize(frameSize));
+
+            /* check vaddr and vtop against USER_TOP to catch case where vaddr + frame_size wrapped around */
+            if (vaddr > USER_TOP || vtop > USER_TOP) {
+                userError("X86Frame: Mapping address too high.");
+                current_syscall_error.type = seL4_InvalidArgument;
+                current_syscall_error.invalidArgumentNumber = 0;
+
+                return EXCEPTION_SYSCALL_ERROR;
+            }
+        }
 
         {
             findVSpaceForASID_ret_t find_ret;
@@ -7885,17 +8242,6 @@ exception_t decodeX86FrameInvocation(
             }
         }
 
-        vtop = vaddr + BIT(pageBitsForSize(frameSize));
-
-        // check vaddr and vtop against PPTR_USER_TOP to catch case where vaddr + frame_size wrapped around
-        if (vaddr > PPTR_USER_TOP || vtop > PPTR_USER_TOP) {
-            userError("X86Frame: Mapping address too high.");
-            current_syscall_error.type = seL4_InvalidArgument;
-            current_syscall_error.invalidArgumentNumber = 0;
-
-            return EXCEPTION_SYSCALL_ERROR;
-        }
-
         vmRights = maskVMRights(capVMRights, rightsFromWord(w_rightsMask));
 
         if (!checkVPAlignment(frameSize, vaddr)) {
@@ -7904,7 +8250,7 @@ exception_t decodeX86FrameInvocation(
             return EXCEPTION_SYSCALL_ERROR;
         }
 
-        paddr = pptr_to_paddr((void*)cap_frame_cap_get_capFBasePtr(cap));
+        paddr = pptr_to_paddr((void *)cap_frame_cap_get_capFBasePtr(cap));
 
         cap = cap_frame_cap_set_capFMappedASID(cap, asid);
         cap = cap_frame_cap_set_capFMappedAddress(cap, vaddr);
@@ -7938,128 +8284,7 @@ exception_t decodeX86FrameInvocation(
         }
 
         default: {
-            return decodeX86ModeMapRemapPage(invLabel, frameSize, cte, cap, vspace, vaddr, paddr, vmRights, vmAttr);
-        }
-        }
-
-        return EXCEPTION_SYSCALL_ERROR;
-    }
-
-    case X86PageRemap: { /* Remap */
-        word_t          vaddr;
-        word_t          w_rightsMask;
-        paddr_t         paddr;
-        cap_t           vspaceCap;
-        vspace_root_t*  vspace;
-        vm_rights_t     capVMRights;
-        vm_rights_t     vmRights;
-        vm_attributes_t vmAttr;
-        vm_page_size_t  frameSize;
-        asid_t          asid, mappedASID;
-
-        if (length < 2 || excaps.excaprefs[0] == NULL) {
-            userError("X86FrameRemap: Truncated message");
-            current_syscall_error.type = seL4_TruncatedMessage;
-
-            return EXCEPTION_SYSCALL_ERROR;
-        }
-
-        if (cap_frame_cap_get_capFMapType(cap) != X86_MappingVSpace) {
-            userError("X86FrameRemap: Attempting to remap frame with different mapping type");
-            current_syscall_error.type = seL4_IllegalOperation;
-
-            return EXCEPTION_SYSCALL_ERROR;
-        }
-
-        w_rightsMask = getSyscallArg(0, buffer);
-        vmAttr = vmAttributesFromWord(getSyscallArg(1, buffer));
-        vspaceCap = excaps.excaprefs[0]->cap;
-
-        if (!isValidNativeRoot(vspaceCap)) {
-            userError("X86FrameRemap: Attempting to map frame into invalid vspace.");
-            current_syscall_error.type = seL4_InvalidCapability;
-            current_syscall_error.invalidCapNumber = 1;
-
-            return EXCEPTION_SYSCALL_ERROR;
-        }
-
-        mappedASID = cap_frame_cap_get_capFMappedASID(cap);
-
-        if (mappedASID == asidInvalid) {
-            userError("X86PageRemap: Frame cap is not mapped.");
-            current_syscall_error.type = seL4_InvalidCapability;
-            current_syscall_error.invalidCapNumber = 0;
-
-            return EXCEPTION_SYSCALL_ERROR;
-        }
-
-        vspace = (vspace_root_t*)pptr_of_cap(vspaceCap);
-        asid = cap_get_capMappedASID(vspaceCap);
-
-        {
-            findVSpaceForASID_ret_t find_ret;
-
-            find_ret = findVSpaceForASID(mappedASID);
-            if (find_ret.status != EXCEPTION_NONE) {
-                userError("X86PageRemap: No VSpace for ASID");
-                current_syscall_error.type = seL4_FailedLookup;
-                current_syscall_error.failedLookupWasSource = false;
-
-                return EXCEPTION_SYSCALL_ERROR;
-            }
-
-            if (find_ret.vspace_root != vspace || asid != mappedASID) {
-                userError("X86PageRemap: Failed ASID lookup");
-                current_syscall_error.type = seL4_InvalidCapability;
-                current_syscall_error.invalidCapNumber = 1;
-
-                return EXCEPTION_SYSCALL_ERROR;
-            }
-        }
-
-        vaddr       = cap_frame_cap_get_capFMappedAddress(cap);
-        frameSize   = cap_frame_cap_get_capFSize(cap);
-        capVMRights = cap_frame_cap_get_capFVMRights(cap);
-        paddr       = pptr_to_paddr((void*)cap_frame_cap_get_capFBasePtr(cap));
-
-        vmRights = maskVMRights(capVMRights, rightsFromWord(w_rightsMask));
-
-        if (!checkVPAlignment(frameSize, vaddr)) {
-            current_syscall_error.type = seL4_AlignmentError;
-
-            return EXCEPTION_SYSCALL_ERROR;
-        }
-
-        switch (frameSize) {
-        /* PTE mappings */
-        case X86_SmallPage: {
-            create_mapping_pte_return_t map_ret;
-
-            map_ret = createSafeMappingEntries_PTE(paddr, vaddr, vmRights, vmAttr, vspace);
-            if (map_ret.status != EXCEPTION_NONE) {
-                return map_ret.status;
-            }
-
-            setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
-            return performX86PageInvocationRemapPTE(map_ret.ptSlot, map_ret.pte, asid, vspace);
-
-        }
-
-        /* PDE mappings */
-        case X86_LargePage: {
-            create_mapping_pde_return_t map_ret;
-
-            map_ret = createSafeMappingEntries_PDE(paddr, vaddr, vmRights, vmAttr, vspace);
-            if (map_ret.status != EXCEPTION_NONE) {
-                return map_ret.status;
-            }
-
-            setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
-            return performX86PageInvocationRemapPDE(map_ret.pdSlot, map_ret.pde, asid, vspace);
-        }
-
-        default: {
-            return decodeX86ModeMapRemapPage(invLabel, frameSize, cte, cap, vspace, vaddr, paddr, vmRights, vmAttr);
+            return decodeX86ModeMapPage(invLabel, frameSize, cte, cap, vspace, vaddr, paddr, vmRights, vmAttr);
         }
         }
 
@@ -8073,13 +8298,13 @@ exception_t decodeX86FrameInvocation(
 
 #ifdef CONFIG_IOMMU
     case X86PageMapIO: { /* MapIO */
-        return decodeX86IOMapInvocation(length, cte, cap, excaps, buffer);
+        return decodeX86IOMapInvocation(length, cte, cap, buffer);
     }
 #endif
 
 #ifdef CONFIG_VTX
     case X86PageMapEPT:
-        return decodeX86EPTPageMap(invLabel, length, cte, cap, excaps, buffer);
+        return decodeX86EPTPageMap(invLabel, length, cte, cap, buffer);
 #endif
 
     case X86PageGetAddress: {
@@ -8087,7 +8312,7 @@ exception_t decodeX86FrameInvocation(
         assert(n_msgRegisters >= 1);
 
         setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
-        return performPageGetAddress((void*)cap_frame_cap_get_capFBasePtr(cap));
+        return performPageGetAddress((void *)cap_frame_cap_get_capFBasePtr(cap), call);
     }
 
     default:
@@ -8097,8 +8322,7 @@ exception_t decodeX86FrameInvocation(
     }
 }
 
-static exception_t
-performX86PageTableInvocationUnmap(cap_t cap, cte_t *ctSlot)
+static exception_t performX86PageTableInvocationUnmap(cap_t cap, cte_t *ctSlot)
 {
 
     if (cap_page_table_cap_get_capPTIsMapped(cap)) {
@@ -8115,8 +8339,8 @@ performX86PageTableInvocationUnmap(cap_t cap, cte_t *ctSlot)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performX86PageTableInvocationMap(cap_t cap, cte_t *ctSlot, pde_t pde, pde_t *pdSlot, vspace_root_t *root)
+static exception_t performX86PageTableInvocationMap(cap_t cap, cte_t *ctSlot, pde_t pde, pde_t *pdSlot,
+                                                    vspace_root_t *root)
 {
     ctSlot->cap = cap;
     *pdSlot = pde;
@@ -8125,20 +8349,18 @@ performX86PageTableInvocationMap(cap_t cap, cte_t *ctSlot, pde_t pde, pde_t *pdS
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeX86PageTableInvocation(
+static exception_t decodeX86PageTableInvocation(
     word_t invLabel,
     word_t length,
-    cte_t* cte, cap_t cap,
-    extra_caps_t excaps,
-    word_t* buffer
+    cte_t *cte, cap_t cap,
+    word_t *buffer
 )
 {
     word_t          vaddr;
     vm_attributes_t attr;
     lookupPDSlot_ret_t pdSlot;
     cap_t           vspaceCap;
-    vspace_root_t*  vspace;
+    vspace_root_t  *vspace;
     pde_t           pde;
     paddr_t         paddr;
     asid_t          asid;
@@ -8153,13 +8375,13 @@ decodeX86PageTableInvocation(
         return performX86PageTableInvocationUnmap(cap, cte);
     }
 
-    if (invLabel != X86PageTableMap ) {
+    if (invLabel != X86PageTableMap) {
         userError("X86PageTable: Illegal operation.");
         current_syscall_error.type = seL4_IllegalOperation;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    if (length < 2 || excaps.excaprefs[0] == NULL) {
+    if (length < 2 || current_extra_caps.excaprefs[0] == NULL) {
         userError("X86PageTable: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -8176,7 +8398,7 @@ decodeX86PageTableInvocation(
 
     vaddr = getSyscallArg(0, buffer) & (~MASK(PT_INDEX_BITS + PAGE_BITS));
     attr = vmAttributesFromWord(getSyscallArg(1, buffer));
-    vspaceCap = excaps.excaprefs[0]->cap;
+    vspaceCap = current_extra_caps.excaprefs[0]->cap;
 
     if (!isValidNativeRoot(vspaceCap)) {
         current_syscall_error.type = seL4_InvalidCapability;
@@ -8185,10 +8407,10 @@ decodeX86PageTableInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    vspace = (vspace_root_t*)pptr_of_cap(vspaceCap);
+    vspace = (vspace_root_t *)pptr_of_cap(vspaceCap);
     asid = cap_get_capMappedASID(vspaceCap);
 
-    if (vaddr > PPTR_USER_TOP) {
+    if (vaddr > USER_TOP) {
         userError("X86PageTable: Mapping address too high.");
         current_syscall_error.type = seL4_InvalidArgument;
         current_syscall_error.invalidArgumentNumber = 0;
@@ -8224,7 +8446,7 @@ decodeX86PageTableInvocation(
     }
 
     if (((pde_ptr_get_page_size(pdSlot.pdSlot) == pde_pde_pt) && pde_pde_pt_ptr_get_present(pdSlot.pdSlot)) ||
-            ((pde_ptr_get_page_size(pdSlot.pdSlot) == pde_pde_large) && pde_pde_large_ptr_get_present(pdSlot.pdSlot))) {
+        ((pde_ptr_get_page_size(pdSlot.pdSlot) == pde_pde_large) && pde_pde_large_ptr_get_present(pdSlot.pdSlot))) {
         current_syscall_error.type = seL4_DeleteFirst;
 
         return EXCEPTION_SYSCALL_ERROR;
@@ -8245,19 +8467,19 @@ exception_t decodeX86MMUInvocation(
     word_t invLabel,
     word_t length,
     cptr_t cptr,
-    cte_t* cte,
+    cte_t *cte,
     cap_t cap,
-    extra_caps_t excaps,
-    word_t* buffer
+    bool_t call,
+    word_t *buffer
 )
 {
     switch (cap_get_capType(cap)) {
 
     case cap_frame_cap:
-        return decodeX86FrameInvocation(invLabel, length, cte, cap, excaps, buffer);
+        return decodeX86FrameInvocation(invLabel, length, cte, cap, call, buffer);
 
     case cap_page_table_cap:
-        return decodeX86PageTableInvocation(invLabel, length, cte, cap, excaps, buffer);
+        return decodeX86PageTableInvocation(invLabel, length, cte, cap, buffer);
 
     case cap_asid_control_cap: {
         word_t     i;
@@ -8266,10 +8488,10 @@ exception_t decodeX86MMUInvocation(
         word_t           depth;
         cap_t            untyped;
         cap_t            root;
-        cte_t*           parentSlot;
-        cte_t*           destSlot;
+        cte_t           *parentSlot;
+        cte_t           *destSlot;
         lookupSlot_ret_t lu_ret;
-        void*            frame;
+        void            *frame;
         exception_t      status;
 
         if (invLabel != X86ASIDControlMakePool) {
@@ -8278,17 +8500,17 @@ exception_t decodeX86MMUInvocation(
             return EXCEPTION_SYSCALL_ERROR;
         }
 
-        if (length < 2 || excaps.excaprefs[0] == NULL
-                || excaps.excaprefs[1] == NULL) {
+        if (length < 2 || current_extra_caps.excaprefs[0] == NULL
+            || current_extra_caps.excaprefs[1] == NULL) {
             current_syscall_error.type = seL4_TruncatedMessage;
             return EXCEPTION_SYSCALL_ERROR;
         }
 
         index = getSyscallArg(0, buffer);
         depth = getSyscallArg(1, buffer);
-        parentSlot = excaps.excaprefs[0];
+        parentSlot = current_extra_caps.excaprefs[0];
         untyped = parentSlot->cap;
-        root = excaps.excaprefs[1]->cap;
+        root = current_extra_caps.excaprefs[1]->cap;
 
         /* Find first free pool */
         for (i = 0; i < nASIDPools && x86KSASIDTable[i]; i++);
@@ -8304,8 +8526,8 @@ exception_t decodeX86MMUInvocation(
 
 
         if (cap_get_capType(untyped) != cap_untyped_cap ||
-                cap_untyped_cap_get_capBlockSize(untyped) != seL4_ASIDPoolBits ||
-                cap_untyped_cap_get_capIsDevice(untyped)) {
+            cap_untyped_cap_get_capBlockSize(untyped) != seL4_ASIDPoolBits ||
+            cap_untyped_cap_get_capIsDevice(untyped)) {
             current_syscall_error.type = seL4_InvalidCapability;
             current_syscall_error.invalidCapNumber = 1;
 
@@ -8336,8 +8558,8 @@ exception_t decodeX86MMUInvocation(
 
     case cap_asid_pool_cap: {
         cap_t        vspaceCap;
-        cte_t*       vspaceCapSlot;
-        asid_pool_t* pool;
+        cte_t       *vspaceCapSlot;
+        asid_pool_t *pool;
         word_t i;
         asid_t       asid;
 
@@ -8346,17 +8568,17 @@ exception_t decodeX86MMUInvocation(
 
             return EXCEPTION_SYSCALL_ERROR;
         }
-        if (excaps.excaprefs[0] == NULL) {
+        if (current_extra_caps.excaprefs[0] == NULL) {
             current_syscall_error.type = seL4_TruncatedMessage;
 
             return EXCEPTION_SYSCALL_ERROR;
         }
 
-        vspaceCapSlot = excaps.excaprefs[0];
+        vspaceCapSlot = current_extra_caps.excaprefs[0];
         vspaceCap = vspaceCapSlot->cap;
 
         if (!(isVTableRoot(vspaceCap) || VTX_TERNARY(cap_get_capType(vspaceCap) == cap_ept_pml4_cap, 0))
-                || cap_get_capMappedASID(vspaceCap) != asidInvalid) {
+            || cap_get_capMappedASID(vspaceCap) != asidInvalid) {
             userError("X86ASIDPool: Invalid vspace root.");
             current_syscall_error.type = seL4_InvalidCapability;
             current_syscall_error.invalidCapNumber = 1;
@@ -8380,7 +8602,8 @@ exception_t decodeX86MMUInvocation(
 
         /* Find first free ASID */
         asid = cap_asid_pool_cap_get_capASIDBase(cap);
-        for (i = 0; i < BIT(asidLowBits) && (asid + i == 0 || asid_map_get_type(pool->array[i]) != asid_map_asid_map_none); i++);
+        for (i = 0; i < BIT(asidLowBits) && (asid + i == 0
+                                             || asid_map_get_type(pool->array[i]) != asid_map_asid_map_none); i++);
 
         if (i == BIT(asidLowBits)) {
             current_syscall_error.type = seL4_DeleteFirst;
@@ -8395,42 +8618,34 @@ exception_t decodeX86MMUInvocation(
     }
 
     default:
-        return decodeX86ModeMMUInvocation(invLabel, length, cptr, cte, cap, excaps, buffer);
+        return decodeX86ModeMMUInvocation(invLabel, length, cptr, cte, cap, call, buffer);
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/kernel/x2apic.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 #include <arch/kernel/x2apic.h>
 
-BOOT_CODE bool_t
-x2apic_is_enabled(void)
+BOOT_CODE bool_t x2apic_is_enabled(void)
 {
     apic_base_msr_t apic_base_msr;
     apic_base_msr.words[0] = x86_rdmsr_low(IA32_APIC_BASE_MSR);
 
     if ((x86_cpuid_ecx(1, 0) & BIT(21)) &&
-            apic_base_msr_get_enabled(apic_base_msr) &&
-            apic_base_msr_get_x2apic(apic_base_msr)) {
+        apic_base_msr_get_enabled(apic_base_msr) &&
+        apic_base_msr_get_x2apic(apic_base_msr)) {
         return true;
     }
     return false;
 }
 
 #ifdef CONFIG_X2APIC
-BOOT_CODE bool_t
-apic_enable(void)
+BOOT_CODE bool_t apic_enable(void)
 {
     apic_base_msr_t apic_base_msr;
     apic_base_msr.words[0] = x86_rdmsr_low(IA32_APIC_BASE_MSR);
@@ -8464,8 +8679,7 @@ bool_t apic_is_interrupt_pending(void)
     return false;
 }
 
-BOOT_CODE void
-apic_send_init_ipi(cpu_id_t cpu_id)
+BOOT_CODE void apic_send_init_ipi(cpu_id_t cpu_id)
 {
     apic_write_icr(
         x2apic_icr2_new(
@@ -8495,8 +8709,7 @@ apic_send_init_ipi(cpu_id_t cpu_id)
     );
 }
 
-BOOT_CODE void
-apic_send_startup_ipi(cpu_id_t cpu_id, paddr_t startup_addr)
+BOOT_CODE void apic_send_startup_ipi(cpu_id_t cpu_id, paddr_t startup_addr)
 {
     /* check if 4K aligned */
     assert(IS_ALIGNED(startup_addr, PAGE_BITS));
@@ -8553,17 +8766,11 @@ void apic_send_ipi_cluster(irq_t vector, word_t mda)
     );
 }
 #endif /* CONFIG_X2APIC */
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/kernel/xapic.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -8587,8 +8794,7 @@ init_xapic_ldr(void)
 }
 #endif /* CONFIG_USE_LOGICAL_IDS */
 
-BOOT_CODE bool_t
-apic_enable(void)
+BOOT_CODE bool_t apic_enable(void)
 {
     apic_base_msr_t apic_base_msr;
     apic_base_msr.words[0] = x86_rdmsr_low(IA32_APIC_BASE_MSR);
@@ -8624,8 +8830,7 @@ bool_t apic_is_interrupt_pending(void)
     return false;
 }
 
-BOOT_CODE void
-apic_send_init_ipi(cpu_id_t cpu_id)
+BOOT_CODE void apic_send_init_ipi(cpu_id_t cpu_id)
 {
     apic_write_icr(
         apic_icr2_new(
@@ -8657,8 +8862,7 @@ apic_send_init_ipi(cpu_id_t cpu_id)
     );
 }
 
-BOOT_CODE void
-apic_send_startup_ipi(cpu_id_t cpu_id, paddr_t startup_addr)
+BOOT_CODE void apic_send_startup_ipi(cpu_id_t cpu_id, paddr_t startup_addr)
 {
     /* check if 4K aligned */
     assert(IS_ALIGNED(startup_addr, PAGE_BITS));
@@ -8730,28 +8934,22 @@ void apic_send_ipi_cluster(irq_t vector, word_t mda)
     );
 }
 #endif /* CONFIG_XAPIC */
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/machine/breakpoint.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 
 #ifdef CONFIG_HARDWARE_DEBUG_API
 
-#include <arch/x86/arch/machine/debug.h>
+#include <arch/machine/debug.h>
 #include <mode/machine/debug.h>
-#include <arch/x86/arch/machine.h>
+#include <arch/machine.h>
 #include <machine/registerset.h>
-#include <plat/api/constants.h> /* seL4_NumHWBReakpoints */
+#include <sel4/plat/api/constants.h> /* seL4_NumHWBReakpoints */
 
 /* Intel manual Vol3, 17.2.4 */
 #define X86_DEBUG_BP_SIZE_1B                (0x0u)
@@ -8789,14 +8987,12 @@ void apic_send_ipi_cluster(irq_t vector, word_t mda)
 
 static bool_t byte8_bps_supported = false;
 
-bool_t
-byte8BreakpointsSupported(void)
+bool_t byte8BreakpointsSupported(void)
 {
     return byte8_bps_supported;
 }
 
-static inline void
-bitwiseAndDr6Reg(word_t mask)
+static inline void bitwiseAndDr6Reg(word_t mask)
 {
     word_t tmp;
 
@@ -8804,26 +9000,22 @@ bitwiseAndDr6Reg(word_t mask)
     writeDr6Reg(tmp);
 }
 
-static inline word_t
-readDr7Context(tcb_t *t)
+static inline word_t readDr7Context(tcb_t *t)
 {
     return t->tcbArch.tcbContext.breakpointState.dr[5];
 }
 
-static inline void
-bitwiseOrDr7Context(tcb_t *t, word_t val)
+static inline void bitwiseOrDr7Context(tcb_t *t, word_t val)
 {
     t->tcbArch.tcbContext.breakpointState.dr[5] |= val;
 }
 
-static inline void
-bitwiseAndDr7Context(tcb_t *t, word_t mask)
+static inline void bitwiseAndDr7Context(tcb_t *t, word_t mask)
 {
     t->tcbArch.tcbContext.breakpointState.dr[5] &= mask;
 }
 
-static void
-unsetDr7BitsFor(tcb_t *t, uint16_t bp_num)
+static void unsetDr7BitsFor(tcb_t *t, uint16_t bp_num)
 {
     word_t mask;
 
@@ -8854,8 +9046,7 @@ unsetDr7BitsFor(tcb_t *t, uint16_t bp_num)
  * @param rw Access trigger condition (read/write).
  * @return Hardware specific register value representing the inputs.
  */
-PURE static inline word_t
-convertTypeAndAccessToArch(uint16_t bp_num, word_t type, word_t rw)
+PURE static inline word_t convertTypeAndAccessToArch(uint16_t bp_num, word_t type, word_t rw)
 {
     switch (type) {
     case seL4_InstructionBreakpoint:
@@ -8892,8 +9083,7 @@ typedef struct {
     word_t type, rw;
 } convertedTypeAndAccess_t;
 
-PURE static inline convertedTypeAndAccess_t
-convertArchToTypeAndAccess(word_t dr7, uint16_t bp_num)
+PURE static inline convertedTypeAndAccess_t convertArchToTypeAndAccess(word_t dr7, uint16_t bp_num)
 {
     convertedTypeAndAccess_t ret;
 
@@ -8940,8 +9130,7 @@ convertArchToTypeAndAccess(word_t dr7, uint16_t bp_num)
  * @param size An integer for the operand size of the breakpoint.
  * @return Converted, hardware-specific value.
  */
-PURE static inline word_t
-convertSizeToArch(uint16_t bp_num, word_t type, word_t size)
+PURE static inline word_t convertSizeToArch(uint16_t bp_num, word_t type, word_t size)
 {
     if (type == seL4_InstructionBreakpoint) {
         /* Intel manual vol3 17.2.4:
@@ -8985,8 +9174,7 @@ convertSizeToArch(uint16_t bp_num, word_t type, word_t size)
  * @param n Breakpoint number.
  * @return Converted size value.
  */
-PURE static inline word_t
-convertArchToSize(word_t dr7, uint16_t bp_num)
+PURE static inline word_t convertArchToSize(word_t dr7, uint16_t bp_num)
 {
     word_t type;
 
@@ -9038,8 +9226,7 @@ convertArchToSize(word_t dr7, uint16_t bp_num)
 /** Enables a breakpoint.
  * @param bp_num Hardware breakpoint ID. Usually an integer from 0..N.
  */
-static void
-enableBreakpoint(tcb_t *t, uint16_t bp_num)
+static void enableBreakpoint(tcb_t *t, uint16_t bp_num)
 {
     word_t enable_bit;
 
@@ -9067,8 +9254,7 @@ enableBreakpoint(tcb_t *t, uint16_t bp_num)
 /** Disables a breakpoint without clearing its configuration.
  * @param bp_num Hardware breakpoint ID. Usually an integer from 0..N.
  */
-static void
-disableBreakpoint(tcb_t *t, uint16_t bp_num)
+static void disableBreakpoint(tcb_t *t, uint16_t bp_num)
 {
     word_t disable_mask;
 
@@ -9096,8 +9282,7 @@ disableBreakpoint(tcb_t *t, uint16_t bp_num)
 /** Returns a boolean for whether or not a breakpoint is enabled.
  * @param bp_num Hardware breakpoint ID. Usually an integer from 0..N.
  */
-static bool_t
-breakpointIsEnabled(tcb_t *t, uint16_t bp_num)
+static bool_t breakpointIsEnabled(tcb_t *t, uint16_t bp_num)
 {
     word_t dr7;
 
@@ -9117,8 +9302,7 @@ breakpointIsEnabled(tcb_t *t, uint16_t bp_num)
     }
 }
 
-static void
-setBpVaddrContext(tcb_t *t, uint16_t bp_num, word_t vaddr)
+static void setBpVaddrContext(tcb_t *t, uint16_t bp_num, word_t vaddr)
 {
     assert(t != NULL);
     user_breakpoint_state_t *ubs = &t->tcbArch.tcbContext.breakpointState;
@@ -9152,9 +9336,8 @@ setBpVaddrContext(tcb_t *t, uint16_t bp_num, word_t vaddr)
  *        trigger the breakpoint. 0 is valid for Instruction breakpoints.
  * @param rw Access type that should trigger the BP (read/write).
  */
-void
-setBreakpoint(tcb_t *t,
-              uint16_t bp_num, word_t vaddr, word_t types, word_t size, word_t rw)
+void setBreakpoint(tcb_t *t,
+                   uint16_t bp_num, word_t vaddr, word_t types, word_t size, word_t rw)
 {
     word_t dr7val;
 
@@ -9169,8 +9352,7 @@ setBreakpoint(tcb_t *t,
     enableBreakpoint(t, bp_num);
 }
 
-static word_t
-getBpVaddrContext(tcb_t *t, uint16_t bp_num)
+static word_t getBpVaddrContext(tcb_t *t, uint16_t bp_num)
 {
     assert(t != NULL);
     user_breakpoint_state_t *ubs = &t->tcbArch.tcbContext.breakpointState;
@@ -9197,8 +9379,7 @@ getBpVaddrContext(tcb_t *t, uint16_t bp_num)
  * @param bp_num Hardware breakpoint ID of the BP you'd like to query.
  * @return Structure containing information about the status of the breakpoint.
  */
-getBreakpoint_t
-getBreakpoint(tcb_t *t, uint16_t bp_num)
+getBreakpoint_t getBreakpoint(tcb_t *t, uint16_t bp_num)
 {
     word_t dr7val;
     getBreakpoint_t ret;
@@ -9220,8 +9401,7 @@ getBreakpoint(tcb_t *t, uint16_t bp_num)
  * @param uds Arch TCB register context pointer.
  * @param bp_num The hardware breakpoint ID you'd like to clear.
  */
-void
-unsetBreakpoint(tcb_t *t, uint16_t bp_num)
+void unsetBreakpoint(tcb_t *t, uint16_t bp_num)
 {
     disableBreakpoint(t, bp_num);
     unsetDr7BitsFor(t, bp_num);
@@ -9240,8 +9420,7 @@ typedef struct {
     word_t instr_vaddr;
 } testAndResetSingleStepException_t;
 
-static testAndResetSingleStepException_t
-testAndResetSingleStepException(tcb_t *t)
+static testAndResetSingleStepException_t testAndResetSingleStepException(tcb_t *t)
 {
     testAndResetSingleStepException_t ret;
     word_t dr6;
@@ -9272,9 +9451,8 @@ testAndResetSingleStepException(tcb_t *t)
     return ret;
 }
 
-bool_t
-configureSingleStepping(tcb_t *t, uint16_t bp_num, word_t n_instr,
-                        UNUSED bool_t is_reply)
+bool_t configureSingleStepping(tcb_t *t, uint16_t bp_num, word_t n_instr,
+                               UNUSED bool_t is_reply)
 {
     /* On x86 no hardware breakpoints are needed for single stepping. */
     if (n_instr == 0) {
@@ -9312,8 +9490,7 @@ typedef struct {
     word_t vaddr, reason;
 } getAndResetActiveBreakpoint_t;
 
-static getAndResetActiveBreakpoint_t
-getAndResetActiveBreakpoint(tcb_t *t)
+static getAndResetActiveBreakpoint_t getAndResetActiveBreakpoint(tcb_t *t)
 {
     convertedTypeAndAccess_t tmp;
     getAndResetActiveBreakpoint_t ret;
@@ -9341,8 +9518,7 @@ getAndResetActiveBreakpoint(tcb_t *t)
     return ret;
 }
 
-exception_t
-handleUserLevelDebugException(int int_vector)
+exception_t handleUserLevelDebugException(int int_vector)
 {
     tcb_t *ct;
     getAndResetActiveBreakpoint_t active_bp;
@@ -9351,8 +9527,6 @@ handleUserLevelDebugException(int int_vector)
 #if defined(CONFIG_DEBUG_BUILD) || defined(CONFIG_BENCHMARK_TRACK_KERNEL_ENTRIES)
     ksKernelEntry.path = Entry_UserLevelFault;
     ksKernelEntry.word = int_vector;
-#else
-    (void)int_vector;
 #endif /* DEBUG */
 
 #ifdef CONFIG_BENCHMARK_TRACK_KERNEL_ENTRIES
@@ -9399,8 +9573,7 @@ handleUserLevelDebugException(int int_vector)
     return EXCEPTION_NONE;
 }
 
-BOOT_CODE bool_t
-Arch_initHardwareBreakpoints(void)
+BOOT_CODE bool_t Arch_initHardwareBreakpoints(void)
 {
     x86_cpu_identity_t *modelinfo;
 
@@ -9408,21 +9581,20 @@ Arch_initHardwareBreakpoints(void)
     /* Intel manuals, vol3, section 17.2.4, "NOTES". */
     if (modelinfo->family == 15) {
         if (modelinfo->model == 3 || modelinfo->model == 4
-                || modelinfo->model == 6) {
+            || modelinfo->model == 6) {
             byte8_bps_supported = true;
         }
     }
     if (modelinfo->family == 6) {
         if (modelinfo->model == 15 || modelinfo->model == 23
-                || modelinfo->model == 0x1C) {
+            || modelinfo->model == 0x1C) {
             byte8_bps_supported = true;
         }
     }
     return true;
 }
 
-void
-Arch_initBreakpointContext(user_breakpoint_state_t *uds)
+void Arch_initBreakpointContext(user_breakpoint_state_t *uds)
 {
     memset(uds, 0, sizeof(*uds));
 
@@ -9441,19 +9613,57 @@ Arch_initBreakpointContext(user_breakpoint_state_t *uds)
 }
 
 #endif
+#line 1 "/Users/payas/git/seL4/src/arch/x86/machine/capdl.c"
+/*
+ * Copyright 2014, General Dynamics C4 Systems
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ */
 
+#include <config.h>
+
+#if defined(CONFIG_DEBUG_BUILD) && defined(CONFIG_PRINTING)
+
+#include <arch/machine/capdl.h>
+#include <string.h>
+#include <kernel/cspace.h>
+#include <machine/io.h>
+#include <arch/object/iospace.h>
+
+
+void x86_obj_ioports_print_attrs(cap_t ioports_cap)
+{
+    printf("(ports: (%lu, %lu))\n",
+           (long unsigned int)cap_io_port_cap_get_capIOPortFirstPort(ioports_cap),
+           (long unsigned int)cap_io_port_cap_get_capIOPortLastPort(ioports_cap));
+}
+
+#ifdef CONFIG_IOMMU
+
+void x86_obj_iospace_print_attrs(cap_t iospace_cap)
+{
+    printf("(domain_id: %lu, pci_device: %lu)\n",
+           (long unsigned int)cap_io_space_cap_get_capPCIDevice(iospace_cap),
+           (long unsigned int)cap_io_space_cap_get_capDomainID(iospace_cap));
+}
+
+void x86_obj_iopt_print_attrs(cap_t iopt_cap)
+{
+    printf("(level: %lu)\n", (long unsigned int)cap_io_page_table_cap_get_capIOPTLevel(iopt_cap));
+}
+#endif
+
+#endif /* defind(CONFIG_DEBUG_BUILD) && defined(CONFIG_PRINTING) */
+#line 1 "/Users/payas/git/seL4/src/arch/x86/machine/cpu_identification.c"
 /*
  * Copyright 2016, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
+
 #include <string.h>
 #include <util.h>
-#include <arch/x86/arch/machine.h>
+#include <arch/machine.h>
 
 /** @file Support routines for identifying the processor family, model, etc
  * on INTEL x86 processors, as well as attempting to determine the model string.
@@ -9481,8 +9691,7 @@ BOOT_CODE x86_cpu_identity_t *x86_cpuid_get_model_info(void)
  * Will be one of "GenuineIntel", "AMDisbetter!", "AuthenticAMD", "CentaurHauls"
  * etc. We don't support x86 CPUs from vendors other than AMD and Intel.
  */
-BOOT_CODE static void
-x86_cpuid_fill_vendor_string(cpu_identity_t *ci)
+BOOT_CODE static void x86_cpuid_fill_vendor_string(cpu_identity_t *ci)
 {
     MAY_ALIAS uint32_t *vendor_string32 = (uint32_t *)ci->vendor_string;
 
@@ -9501,9 +9710,8 @@ struct family_model {
     uint8_t family, model;
 };
 
-BOOT_CODE static void
-x86_cpuid_intel_identity_initialize(cpu_identity_t *ci,
-                                    struct family_model original)
+BOOT_CODE static void x86_cpuid_intel_identity_initialize(cpu_identity_t *ci,
+                                                          struct family_model original)
 {
     /* Next, there are some values which require additional adjustment, and
      * require you to take into account an additional extended family and model
@@ -9543,9 +9751,8 @@ x86_cpuid_intel_identity_initialize(cpu_identity_t *ci,
     }
 }
 
-BOOT_CODE static void
-x86_cpuid_amd_identity_initialize(cpu_identity_t *ci,
-                                  struct family_model original)
+BOOT_CODE static void x86_cpuid_amd_identity_initialize(cpu_identity_t *ci,
+                                                        struct family_model original)
 {
     /* Intel and AMD's specifications give slightly different ways to compose
      * the family and model IDs (AMD CPUID manual, section 2.)
@@ -9563,8 +9770,7 @@ x86_cpuid_amd_identity_initialize(cpu_identity_t *ci,
     }
 }
 
-bool_t
-x86_cpuid_initialize(void)
+bool_t x86_cpuid_initialize(void)
 {
     cpu_identity_t *ci = x86_cpuid_get_identity();
     struct family_model original;
@@ -9615,15 +9821,11 @@ x86_cpuid_initialize(void)
         return false;
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/machine/fpu.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <model/statedata.h>
@@ -9635,8 +9837,7 @@ x86_cpuid_initialize(void)
 /*
  * Setup the FPU register state for a new thread.
  */
-void
-Arch_initFpuContext(user_context_t *context)
+void Arch_initFpuContext(user_context_t *context)
 {
     context->fpuState = x86KSnullFpuState;
 }
@@ -9644,8 +9845,7 @@ Arch_initFpuContext(user_context_t *context)
 /*
  * Initialise the FPU for this machine.
  */
-BOOT_CODE bool_t
-Arch_initFpu(void)
+BOOT_CODE bool_t Arch_initFpu(void)
 {
     /* Enable FPU / SSE / SSE2 / SSE3 / SSSE3 / SSE4 Extensions. */
     write_cr4(read_cr4() | CR4_OSFXSR);
@@ -9727,37 +9927,33 @@ Arch_initFpu(void)
     disableFpu();
     return true;
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/machine/hardware.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <types.h>
 #include <machine/registerset.h>
 #include <model/statedata.h>
 #include <object/structures.h>
-#include <arch/x86/arch/machine.h>
+#include <arch/machine.h>
 #include <arch/machine/hardware.h>
 #include <arch/machine/registerset.h>
 #include <linker.h>
 
 /* initialises MSRs required to setup sysenter and sysexit */
-BOOT_CODE void
-init_sysenter_msrs(void)
+BOOT_CODE void init_sysenter_msrs(void)
 {
-    x86_wrmsr(IA32_SYSENTER_CS_MSR,  (uint64_t)(word_t)SEL_CS_0);
+    x86_wrmsr(IA32_SYSENTER_CS_MSR, (uint64_t)(word_t)SEL_CS_0);
     x86_wrmsr(IA32_SYSENTER_EIP_MSR, (uint64_t)(word_t)&handle_syscall);
     if (config_set(CONFIG_ARCH_IA32) && !config_set(CONFIG_HARDWARE_DEBUG_API)) {
         /* manually add 4 bytes to x86KStss so that it is valid for both
          * 32-bit and 64-bit, although only ia32 actually requires a valid
          * sysenter esp */
-        x86_wrmsr(IA32_SYSENTER_ESP_MSR, (uint64_t)(word_t)((char *)&x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.tss.words[0] + 4));
+        x86_wrmsr(IA32_SYSENTER_ESP_MSR, (uint64_t)(word_t)((char *)&x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.tss.words[0]
+                                                            + 4));
     }
 }
 
@@ -9772,8 +9968,7 @@ void setNextPC(tcb_t *thread, word_t v)
 }
 
 /* Returns the size of CPU's cacheline */
-BOOT_CODE uint32_t CONST
-getCacheLineSizeBits(void)
+BOOT_CODE uint32_t CONST getCacheLineSizeBits(void)
 {
     uint32_t line_size;
     uint32_t n;
@@ -9801,7 +9996,7 @@ getCacheLineSizeBits(void)
 
 /* Flushes a specific memory range from the CPU cache */
 
-void flushCacheRange(void* vaddr, uint32_t size_bits)
+void flushCacheRange(void *vaddr, uint32_t size_bits)
 {
     word_t v;
 
@@ -9811,16 +10006,15 @@ void flushCacheRange(void* vaddr, uint32_t size_bits)
     x86_mfence();
 
     for (v = ROUND_DOWN((word_t)vaddr, x86KScacheLineSizeBits);
-            v < (word_t)vaddr + BIT(size_bits);
-            v += BIT(x86KScacheLineSizeBits)) {
-        flushCacheLine((void*)v);
+         v < (word_t)vaddr + BIT(size_bits);
+         v += BIT(x86KScacheLineSizeBits)) {
+        flushCacheLine((void *)v);
     }
     x86_mfence();
 }
 
 /* Disables as many prefetchers as possible */
-BOOT_CODE bool_t
-disablePrefetchers()
+BOOT_CODE bool_t disablePrefetchers(void)
 {
     x86_cpu_identity_t *model_info;
     uint32_t low, high;
@@ -9849,7 +10043,7 @@ disablePrefetchers()
          * there is no need to also look at the model_ID.
          */
         if (model_info->family == IA32_PREFETCHER_COMPATIBLE_FAMILIES_ID
-                && model_info->model == valid_models[i]) {
+            && model_info->model == valid_models[i]) {
             low = x86_rdmsr_low(IA32_PREFETCHER_MSR);
             high = x86_rdmsr_high(IA32_PREFETCHER_MSR);
 
@@ -9869,14 +10063,12 @@ disablePrefetchers()
     return false;
 }
 
-BOOT_CODE void
-enablePMCUser(void)
+BOOT_CODE void enablePMCUser(void)
 {
     write_cr4(read_cr4() | CR4_PCE);
 }
 
-BOOT_CODE bool_t
-init_ibrs(void)
+BOOT_CODE bool_t init_ibrs(void)
 {
     cpuid_007h_edx_t edx;
     edx.words[0] = x86_cpuid_edx(0x7, 0);
@@ -9917,26 +10109,21 @@ init_ibrs(void)
     }
     return true;
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/machine/registerset.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 #include <arch/machine/registerset.h>
 
-void Arch_initContext(user_context_t* context)
+void Arch_initContext(user_context_t *context)
 {
     Mode_initContext(context);
-    context->registers[TLS_BASE] = 0;
+    context->registers[FS_BASE] = 0;
+    context->registers[GS_BASE] = 0;
     context->registers[Error] = 0;
     context->registers[FaultIP] = 0;
     context->registers[NextIP] = 0;            /* overwritten by setNextPC() later on */
@@ -9966,22 +10153,18 @@ word_t sanitiseRegister(register_t reg, word_t v, bool_t archInfo)
     }
     return v;
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/model/statedata.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 #include <util.h>
 #include <api/types.h>
 #include <arch/types.h>
-#include <arch/x86/arch/model/statedata.h>
+#include <arch/model/statedata.h>
 #include <arch/object/structures.h>
 
 /* ==== read/write kernel state not preserved across kernel entries ==== */
@@ -9996,7 +10179,7 @@ UP_STATE_DEFINE(interrupt_t, x86KSPendingInterrupt);
 x86_arch_global_state_t x86KSGlobalState[CONFIG_MAX_NUM_NODES] ALIGN(L1_CACHE_LINE_SIZE) SKIM_BSS;
 
 /* The top level ASID table */
-asid_pool_t* x86KSASIDTable[BIT(asidHighBits)];
+asid_pool_t *x86KSASIDTable[BIT(asidHighBits)];
 
 /* Current user value of the fs/gs base */
 UP_STATE_DEFINE(word_t, x86KSCurrentFSBase);
@@ -10020,7 +10203,7 @@ uint32_t x86KSnumDrhu;
 
 #ifdef CONFIG_IOMMU
 /* Intel VT-d Root Entry Table */
-vtd_rte_t* x86KSvtdRootTable;
+vtd_rte_t *x86KSvtdRootTable;
 uint32_t x86KSnumIOPTLevels;
 uint32_t x86KSnumIODomainIDBits;
 uint32_t x86KSFirstValidIODomain;
@@ -10033,7 +10216,7 @@ UP_STATE_DEFINE(vcpu_t *, x86KSCurrentVCPU);
 #ifdef CONFIG_PRINTING
 uint16_t x86KSconsolePort;
 #endif
-#ifdef CONFIG_DEBUG_BUILD
+#if defined(CONFIG_PRINTING) || defined(CONFIG_DEBUG_BUILD)
 uint16_t x86KSdebugPort;
 #endif
 
@@ -10042,33 +10225,32 @@ uint16_t x86KSdebugPort;
 x86_irq_state_t x86KSIRQState[maxIRQ + 1];
 
 word_t x86KSAllocatedIOPorts[NUM_IO_PORTS / CONFIG_WORD_SIZE];
-
+#ifdef CONFIG_KERNEL_MCS
+uint32_t x86KStscMhz;
+uint32_t x86KSapicRatio;
+#endif
+#line 1 "/Users/payas/git/seL4/src/arch/x86/object/interrupt.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <kernel/boot.h>
 #include <model/statedata.h>
 #include <arch/object/interrupt.h>
-#include <build/gen_headers/arch/api/invovation.h>
+#include <arch/api/invocation.h>
 #include <linker.h>
 #include <plat/machine/hardware.h>
 #include <plat/machine/pci.h>
 
-void
-Arch_irqStateInit(void)
+void Arch_irqStateInit(void)
 {
     int i = 0;
     for (i = 0; i <= maxIRQ; i++) {
         if (i == irq_timer
 #ifdef CONFIG_IOMMU
-                || i == irq_iommu
+            || i == irq_iommu
 #endif
            ) {
             x86KSIRQState[i] = x86_irq_state_irq_reserved_new();
@@ -10084,8 +10266,7 @@ Arch_irqStateInit(void)
  * the IRQs >= 16. Additionally these IRQs only exist
  * if using the legacy PIC interrupt
  */
-exception_t
-Arch_checkIRQ(word_t irq_w)
+exception_t Arch_checkIRQ(word_t irq_w)
 {
     if (config_set(CONFIG_IRQ_PIC) && irq_w >= irq_isa_min && irq_w <= irq_isa_max) {
         return EXCEPTION_NONE;
@@ -10102,24 +10283,22 @@ Arch_checkIRQ(word_t irq_w)
     return EXCEPTION_SYSCALL_ERROR;
 }
 
-static exception_t
-Arch_invokeIRQControl(irq_t irq, cte_t *handlerSlot, cte_t *controlSlot, x86_irq_state_t irqState)
+static exception_t Arch_invokeIRQControl(irq_t irq, cte_t *handlerSlot, cte_t *controlSlot, x86_irq_state_t irqState)
 {
     updateIRQState(irq, irqState);
     return invokeIRQControl(irq, handlerSlot, controlSlot);
 }
 
-static exception_t
-invokeIssueIRQHandlerIOAPIC(irq_t irq, word_t ioapic, word_t pin, word_t level, word_t polarity, word_t vector,
-                            cte_t *handlerSlot, cte_t *controlSlot)
+static exception_t invokeIssueIRQHandlerIOAPIC(irq_t irq, word_t ioapic, word_t pin, word_t level, word_t polarity,
+                                               word_t vector,
+                                               cte_t *handlerSlot, cte_t *controlSlot)
 {
     x86_irq_state_t irqState = x86_irq_state_irq_ioapic_new(ioapic, pin, level, polarity, 1);
     ioapic_map_pin_to_vector(ioapic, pin, level, polarity, vector);
     return Arch_invokeIRQControl(irq, handlerSlot, controlSlot, irqState);
 }
 
-exception_t
-Arch_decodeIRQControlInvocation(word_t invLabel, word_t length, cte_t *srcSlot, extra_caps_t excaps, word_t *buffer)
+exception_t Arch_decodeIRQControlInvocation(word_t invLabel, word_t length, cte_t *srcSlot, word_t *buffer)
 {
     word_t index, depth;
     cte_t *destSlot;
@@ -10144,14 +10323,14 @@ Arch_decodeIRQControlInvocation(word_t invLabel, word_t length, cte_t *srcSlot, 
 
     /* check the common parameters */
 
-    if (length < 7 || excaps.excaprefs[0] == NULL) {
+    if (length < 7 || current_extra_caps.excaprefs[0] == NULL) {
         userError("IRQControl: Truncated message");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
     index = getSyscallArg(0, buffer);
     depth = getSyscallArg(1, buffer);
-    cnodeCap = excaps.excaprefs[0]->cap;
+    cnodeCap = current_extra_caps.excaprefs[0]->cap;
     irq = getSyscallArg(6, buffer);
     if (irq > irq_user_max - irq_user_min) {
         userError("IRQControl: Invalid irq %ld should be between 0-%ld", (long)irq, (long)(irq_user_max - irq_user_min));
@@ -10206,7 +10385,6 @@ Arch_decodeIRQControlInvocation(word_t invLabel, word_t length, cte_t *srcSlot, 
         x86_irq_state_t irqState;
         /* until we support msi interrupt remaping through vt-d we ignore the
          * vector and trust the user */
-        (void)vector;
 
         if (pci_bus > PCI_BUS_MAX) {
             current_syscall_error.type = seL4_RangeError;
@@ -10240,15 +10418,11 @@ Arch_decodeIRQControlInvocation(word_t invLabel, word_t length, cte_t *srcSlot, 
         fail("IRQControl: Illegal operation");
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/object/ioport.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <kernel/thread.h>
@@ -10256,11 +10430,10 @@ Arch_decodeIRQControlInvocation(word_t invLabel, word_t length, cte_t *srcSlot, 
 #include <api/syscall.h>
 #include <machine/io.h>
 #include <arch/object/ioport.h>
-#include <build/gen_headers/arch/api/invovation.h>
+#include <arch/api/invocation.h>
 #include <plat/machine/io.h>
 
-static inline void
-apply_pattern(word_t_may_alias *w, word_t pattern, bool_t set)
+static inline void apply_pattern(word_t_may_alias *w, word_t pattern, bool_t set)
 {
     if (set) {
         *w |= pattern;
@@ -10269,8 +10442,7 @@ apply_pattern(word_t_may_alias *w, word_t pattern, bool_t set)
     }
 }
 
-static inline word_t
-make_pattern(int start, int end)
+static inline word_t make_pattern(int start, int end)
 {
     // number of bits we want to have set
     int num_bits = end - start;
@@ -10279,8 +10451,7 @@ make_pattern(int start, int end)
     return (~(word_t)0) >> (CONFIG_WORD_SIZE - num_bits) << start;
 }
 
-static exception_t
-ensurePortOperationAllowed(cap_t cap, uint32_t start_port, uint32_t size)
+static exception_t ensurePortOperationAllowed(cap_t cap, uint32_t start_port, uint32_t size)
 {
     uint32_t first_allowed = cap_io_port_cap_get_capIOPortFirstPort(cap);
     uint32_t last_allowed = cap_io_port_cap_get_capIOPortLastPort(cap);
@@ -10299,14 +10470,12 @@ ensurePortOperationAllowed(cap_t cap, uint32_t start_port, uint32_t size)
     return EXCEPTION_NONE;
 }
 
-void
-freeIOPortRange(uint16_t first_port, uint16_t last_port)
+void freeIOPortRange(uint16_t first_port, uint16_t last_port)
 {
     setIOPortMask(x86KSAllocatedIOPorts, first_port, last_port, false);
 }
 
-static bool_t
-isIOPortRangeFree(uint16_t first_port, uint16_t last_port)
+static bool_t isIOPortRangeFree(uint16_t first_port, uint16_t last_port)
 {
     int low_word = first_port >> wordRadix;
     int high_word = last_port >> wordRadix;
@@ -10339,8 +10508,7 @@ isIOPortRangeFree(uint16_t first_port, uint16_t last_port)
     return true;
 }
 
-static exception_t
-invokeX86PortControl(uint16_t first_port, uint16_t last_port, cte_t *ioportSlot, cte_t *controlSlot)
+static exception_t invokeX86PortControl(uint16_t first_port, uint16_t last_port, cte_t *ioportSlot, cte_t *controlSlot)
 {
     setIOPortMask(x86KSAllocatedIOPorts, first_port, last_port, true);
     cteInsert(cap_io_port_cap_new(first_port, last_port
@@ -10353,15 +10521,13 @@ invokeX86PortControl(uint16_t first_port, uint16_t last_port, cte_t *ioportSlot,
     return EXCEPTION_NONE;
 }
 
-exception_t
-decodeX86PortControlInvocation(
+exception_t decodeX86PortControlInvocation(
     word_t invLabel,
     word_t length,
     cptr_t cptr,
-    cte_t* slot,
+    cte_t *slot,
     cap_t cap,
-    extra_caps_t excaps,
-    word_t* buffer
+    word_t *buffer
 )
 {
     uint16_t first_port;
@@ -10378,7 +10544,7 @@ decodeX86PortControlInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    if (length < 4 || excaps.excaprefs[0] == NULL) {
+    if (length < 4 || current_extra_caps.excaprefs[0] == NULL) {
         userError("IOPortControl: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -10389,7 +10555,7 @@ decodeX86PortControlInvocation(
     index = getSyscallArg(2, buffer);
     depth = getSyscallArg(3, buffer);
 
-    cnodeCap = excaps.excaprefs[0]->cap;
+    cnodeCap = current_extra_caps.excaprefs[0]->cap;
 
     if (last_port < first_port) {
         userError("IOPortControl: Last port must be > first port.");
@@ -10405,7 +10571,7 @@ decodeX86PortControlInvocation(
     }
 
     lu_ret = lookupTargetSlot(cnodeCap, index, depth);
-    if (lu_ret.status != EXCEPTION_NONE ) {
+    if (lu_ret.status != EXCEPTION_NONE) {
         userError("Target slot for new IO Port cap invalid: cap %lu.", getExtraCPtr(buffer, 0));
         return lu_ret.status;
     }
@@ -10421,11 +10587,11 @@ decodeX86PortControlInvocation(
     return invokeX86PortControl(first_port, last_port, destSlot, slot);
 }
 
-static exception_t
-invokeX86PortIn(word_t invLabel, uint16_t port, bool_t call)
+static exception_t invokeX86PortIn(word_t invLabel, uint16_t port, bool_t call)
 {
     uint32_t res;
-    word_t len;
+    tcb_t *thread;
+    thread = NODE_STATE(ksCurThread);
 
     switch (invLabel) {
     case X86IOPortIn8:
@@ -10440,36 +10606,17 @@ invokeX86PortIn(word_t invLabel, uint16_t port, bool_t call)
     }
 
     if (call) {
-        setRegister(NODE_STATE(ksCurThread), badgeRegister, 0);
-
-        if (n_msgRegisters < 1) {
-            word_t* ipcBuffer;
-            ipcBuffer = lookupIPCBuffer(true, NODE_STATE(ksCurThread));
-            if (ipcBuffer != NULL) {
-                ipcBuffer[1] = res;
-                len = 1;
-            } else {
-                len = 0;
-            }
-        } else {
-            setRegister(NODE_STATE(ksCurThread), msgRegisters[0], res);
-            len = 1;
-        }
-
-        setRegister(NODE_STATE(ksCurThread), msgInfoRegister,
-                    wordFromMessageInfo(seL4_MessageInfo_new(0, 0, 0, len)));
+        word_t *ipcBuffer = lookupIPCBuffer(true, thread);
+        setRegister(thread, badgeRegister, 0);
+        unsigned int length = setMR(thread, ipcBuffer, 0, res);
+        setRegister(thread, msgInfoRegister, wordFromMessageInfo(
+                        seL4_MessageInfo_new(0, 0, 0, length)));
     }
-    // Prevent handleInvocation from attempting to complete the 'call' with an empty
-    // message (via replyFromKernel_success_empty) by forcing the thread state to
-    // be running. This prevents our stored message we just created from being
-    // overwritten.
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Running);
-
     return EXCEPTION_NONE;
 }
 
-static exception_t
-invokeX86PortOut(word_t invLabel, uint16_t port, uint32_t data)
+static exception_t invokeX86PortOut(word_t invLabel, uint16_t port, uint32_t data)
 {
     switch (invLabel) {
     case X86IOPortOut8:
@@ -10486,16 +10633,14 @@ invokeX86PortOut(word_t invLabel, uint16_t port, uint32_t data)
     return EXCEPTION_NONE;
 }
 
-exception_t
-decodeX86PortInvocation(
+exception_t decodeX86PortInvocation(
     word_t invLabel,
     word_t length,
     cptr_t cptr,
-    cte_t* slot,
+    cte_t *slot,
     cap_t cap,
-    extra_caps_t excaps,
     bool_t call,
-    word_t* buffer
+    word_t *buffer
 )
 {
     exception_t ret;
@@ -10567,8 +10712,7 @@ decodeX86PortInvocation(
     }
 }
 
-void
-setIOPortMask(void *ioport_bitmap, uint16_t low, uint16_t high, bool_t set)
+void setIOPortMask(void *ioport_bitmap, uint16_t low, uint16_t high, bool_t set)
 {
     //get an aliasing pointer
     word_t_may_alias *bitmap = ioport_bitmap;
@@ -10595,15 +10739,11 @@ setIOPortMask(void *ioport_bitmap, uint16_t low, uint16_t high, bool_t set)
         apply_pattern(bitmap + low_word, make_pattern(0, high_index + 1), set);
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/object/iospace.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -10613,9 +10753,9 @@ setIOPortMask(void *ioport_bitmap, uint16_t low, uint16_t high, bool_t set)
 #include <api/syscall.h>
 #include <machine/io.h>
 #include <kernel/thread.h>
-#include <build/gen_headers/arch/api/invocation.h>
+#include <arch/api/invocation.h>
 #include <arch/object/iospace.h>
-#include <arch/x86/arch/model/statedata.h>
+#include <arch/model/statedata.h>
 #include <linker.h>
 #include <plat/machine/intel-vtd.h>
 
@@ -10626,8 +10766,7 @@ typedef struct lookupVTDContextSlot_ret {
 } lookupVTDContextSlot_ret_t;
 
 
-BOOT_CODE cap_t
-master_iospace_cap(void)
+BOOT_CODE cap_t master_iospace_cap(void)
 {
     if (x86KSnumDrhu == 0) {
         return cap_null_cap_new();
@@ -10640,15 +10779,14 @@ master_iospace_cap(void)
         );
 }
 
-static vtd_cte_t*
-lookup_vtd_context_slot(cap_t cap)
+static vtd_cte_t *lookup_vtd_context_slot(cap_t cap)
 {
     uint32_t   vtd_root_index;
     uint32_t   vtd_context_index;
     uint32_t   pci_request_id;
-    vtd_rte_t* vtd_root_slot;
-    vtd_cte_t* vtd_context;
-    vtd_cte_t* vtd_context_slot;
+    vtd_rte_t *vtd_root_slot;
+    vtd_cte_t *vtd_context;
+    vtd_cte_t *vtd_context_slot;
 
     switch (cap_get_capType(cap)) {
     case cap_io_space_cap:
@@ -10670,16 +10808,15 @@ lookup_vtd_context_slot(cap_t cap)
     vtd_root_index = get_pci_bus(pci_request_id);
     vtd_root_slot = x86KSvtdRootTable + vtd_root_index;
 
-    vtd_context = (vtd_cte_t*)paddr_to_pptr(vtd_rte_ptr_get_ctp(vtd_root_slot));
+    vtd_context = (vtd_cte_t *)paddr_to_pptr(vtd_rte_ptr_get_ctp(vtd_root_slot));
     vtd_context_index = (get_pci_dev(pci_request_id) << 3) | get_pci_fun(pci_request_id);
     vtd_context_slot = &vtd_context[vtd_context_index];
 
     return vtd_context_slot;
 }
 
-static lookupIOPTSlot_ret_t
-lookupIOPTSlot_resolve_levels(vtd_pte_t *iopt, word_t translation,
-                              word_t levels_to_resolve, word_t levels_remaining)
+static lookupIOPTSlot_ret_t lookupIOPTSlot_resolve_levels(vtd_pte_t *iopt, word_t translation,
+                                                          word_t levels_to_resolve, word_t levels_remaining)
 {
     lookupIOPTSlot_ret_t ret;
 
@@ -10694,7 +10831,8 @@ lookupIOPTSlot_resolve_levels(vtd_pte_t *iopt, word_t translation,
         return ret;
     }
 
-    iopt_index = (translation  >> (VTD_PT_INDEX_BITS * (x86KSnumIOPTLevels - 1 - (levels_to_resolve - levels_remaining)))) & MASK(VTD_PT_INDEX_BITS);
+    iopt_index = (translation  >> (VTD_PT_INDEX_BITS * (x86KSnumIOPTLevels - 1 - (levels_to_resolve - levels_remaining)))) &
+                 MASK(VTD_PT_INDEX_BITS);
     iopt_slot = iopt + iopt_index;
 
     if (!vtd_pte_ptr_get_write(iopt_slot) || levels_remaining == 0) {
@@ -10708,8 +10846,7 @@ lookupIOPTSlot_resolve_levels(vtd_pte_t *iopt, word_t translation,
 }
 
 
-static inline lookupIOPTSlot_ret_t
-lookupIOPTSlot(vtd_pte_t* iopt, word_t io_address)
+static inline lookupIOPTSlot_ret_t lookupIOPTSlot(vtd_pte_t *iopt, word_t io_address)
 {
     lookupIOPTSlot_ret_t ret;
 
@@ -10724,8 +10861,7 @@ lookupIOPTSlot(vtd_pte_t* iopt, word_t io_address)
     }
 }
 
-void
-unmapVTDContextEntry(cap_t cap)
+void unmapVTDContextEntry(cap_t cap)
 {
     vtd_cte_t *cte = lookup_vtd_context_slot(cap);
     assert(cte != 0);
@@ -10744,8 +10880,7 @@ unmapVTDContextEntry(cap_t cap)
     return;
 }
 
-static exception_t
-performX86IOPTInvocationUnmap(cap_t cap, cte_t *ctSlot)
+static exception_t performX86IOPTInvocationUnmap(cap_t cap, cte_t *ctSlot)
 {
     deleteIOPageTable(cap);
     cap = cap_io_page_table_cap_set_capIOPTIsMapped(cap, 0);
@@ -10754,8 +10889,8 @@ performX86IOPTInvocationUnmap(cap_t cap, cte_t *ctSlot)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performX86IOPTInvocationMapContextRoot(cap_t cap, cte_t *ctSlot, vtd_cte_t vtd_cte, vtd_cte_t *vtd_context_slot)
+static exception_t performX86IOPTInvocationMapContextRoot(cap_t cap, cte_t *ctSlot, vtd_cte_t vtd_cte,
+                                                          vtd_cte_t *vtd_context_slot)
 {
     *vtd_context_slot = vtd_cte;
     flushCacheRange(vtd_context_slot, VTD_CTE_SIZE_BITS);
@@ -10764,8 +10899,7 @@ performX86IOPTInvocationMapContextRoot(cap_t cap, cte_t *ctSlot, vtd_cte_t vtd_c
     return EXCEPTION_NONE;
 }
 
-static exception_t
-performX86IOPTInvocationMapPT(cap_t cap, cte_t *ctSlot, vtd_pte_t iopte, vtd_pte_t *ioptSlot)
+static exception_t performX86IOPTInvocationMapPT(cap_t cap, cte_t *ctSlot, vtd_pte_t iopte, vtd_pte_t *ioptSlot)
 {
     *ioptSlot = iopte;
     flushCacheRange(ioptSlot, VTD_PTE_SIZE_BITS);
@@ -10774,14 +10908,12 @@ performX86IOPTInvocationMapPT(cap_t cap, cte_t *ctSlot, vtd_pte_t iopte, vtd_pte
     return EXCEPTION_NONE;
 }
 
-exception_t
-decodeX86IOPTInvocation(
+exception_t decodeX86IOPTInvocation(
     word_t       invLabel,
     word_t       length,
-    cte_t*       slot,
+    cte_t       *slot,
     cap_t        cap,
-    extra_caps_t excaps,
-    word_t*      buffer
+    word_t      *buffer
 )
 {
     cap_t      io_space;
@@ -10789,8 +10921,8 @@ decodeX86IOPTInvocation(
     uint32_t   pci_request_id;
     word_t   io_address;
     uint16_t   domain_id;
-    vtd_cte_t* vtd_context_slot;
-    vtd_pte_t* vtd_pte;
+    vtd_cte_t *vtd_context_slot;
+    vtd_pte_t *vtd_pte;
 
     if (invLabel == X86IOPageTableUnmap) {
 
@@ -10798,19 +10930,19 @@ decodeX86IOPTInvocation(
         return performX86IOPTInvocationUnmap(cap, slot);
     }
 
-    if (invLabel != X86IOPageTableMap ) {
+    if (invLabel != X86IOPageTableMap) {
         userError("X86IOPageTable: Illegal operation.");
         current_syscall_error.type = seL4_IllegalOperation;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    if (excaps.excaprefs[0] == NULL || length < 1) {
+    if (current_extra_caps.excaprefs[0] == NULL || length < 1) {
         userError("X86IOPageTableMap: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    io_space     = excaps.excaprefs[0]->cap;
+    io_space     = current_extra_caps.excaprefs[0]->cap;
     io_address   = getSyscallArg(0, buffer) & ~MASK(VTD_PT_INDEX_BITS + seL4_PageBits);
 
     if (cap_io_page_table_cap_get_capIOPTIsMapped(cap)) {
@@ -10893,8 +11025,7 @@ decodeX86IOPTInvocation(
     }
 }
 
-static exception_t
-performX86IOInvocationMap(cap_t cap, cte_t *ctSlot, vtd_pte_t iopte, vtd_pte_t *ioptSlot)
+static exception_t performX86IOInvocationMap(cap_t cap, cte_t *ctSlot, vtd_pte_t iopte, vtd_pte_t *ioptSlot)
 {
     ctSlot->cap = cap;
     *ioptSlot = iopte;
@@ -10904,27 +11035,25 @@ performX86IOInvocationMap(cap_t cap, cte_t *ctSlot, vtd_pte_t iopte, vtd_pte_t *
 }
 
 
-exception_t
-decodeX86IOMapInvocation(
+exception_t decodeX86IOMapInvocation(
     word_t       length,
-    cte_t*       slot,
+    cte_t       *slot,
     cap_t        cap,
-    extra_caps_t excaps,
-    word_t*      buffer
+    word_t      *buffer
 )
 {
     cap_t      io_space;
     word_t     io_address;
     uint32_t   pci_request_id;
-    vtd_cte_t* vtd_context_slot;
-    vtd_pte_t* vtd_pte;
+    vtd_cte_t *vtd_context_slot;
+    vtd_pte_t *vtd_pte;
     vtd_pte_t  iopte;
     paddr_t    paddr;
     lookupIOPTSlot_ret_t lu_ret;
     vm_rights_t frame_cap_rights;
     seL4_CapRights_t dma_cap_rights_mask;
 
-    if (excaps.excaprefs[0] == NULL || length < 2) {
+    if (current_extra_caps.excaprefs[0] == NULL || length < 2) {
         userError("X86PageMapIO: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -10944,9 +11073,9 @@ decodeX86IOMapInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    io_space    = excaps.excaprefs[0]->cap;
+    io_space    = current_extra_caps.excaprefs[0]->cap;
     io_address  = getSyscallArg(1, buffer) & ~MASK(PAGE_BITS);
-    paddr       = pptr_to_paddr((void*)cap_frame_cap_get_capFBasePtr(cap));
+    paddr       = pptr_to_paddr((void *)cap_frame_cap_get_capFBasePtr(cap));
 
     if (cap_get_capType(io_space) != cap_io_space_cap) {
         userError("X86PageMapIO: Invalid IO space capability.");
@@ -10973,7 +11102,7 @@ decodeX86IOMapInvocation(
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    vtd_pte = (vtd_pte_t*)paddr_to_pptr(vtd_cte_ptr_get_asr(vtd_context_slot));
+    vtd_pte = (vtd_pte_t *)paddr_to_pptr(vtd_cte_ptr_get_asr(vtd_context_slot));
     lu_ret  = lookupIOPTSlot(vtd_pte, io_address);
     if (lu_ret.status != EXCEPTION_NONE || lu_ret.level != 0) {
         current_syscall_error.type = seL4_FailedLookup;
@@ -11012,8 +11141,8 @@ void deleteIOPageTable(cap_t io_pt_cap)
     lookupIOPTSlot_ret_t lu_ret;
     uint32_t             level;
     word_t               io_address;
-    vtd_cte_t*           vtd_context_slot;
-    vtd_pte_t*           vtd_pte;
+    vtd_cte_t           *vtd_context_slot;
+    vtd_pte_t           *vtd_pte;
 
     if (cap_io_page_table_cap_get_capIOPTIsMapped(io_pt_cap)) {
         io_pt_cap = cap_io_page_table_cap_set_capIOPTIsMapped(io_pt_cap, 0);
@@ -11024,7 +11153,7 @@ void deleteIOPageTable(cap_t io_pt_cap)
             return;
         }
 
-        vtd_pte = (vtd_pte_t*)paddr_to_pptr(vtd_cte_ptr_get_asr(vtd_context_slot));
+        vtd_pte = (vtd_pte_t *)paddr_to_pptr(vtd_cte_ptr_get_asr(vtd_context_slot));
 
         if (level == 0) {
             /* if we have been overmapped or something */
@@ -11042,13 +11171,14 @@ void deleteIOPageTable(cap_t io_pt_cap)
             flushCacheRange(vtd_context_slot, VTD_CTE_SIZE_BITS);
         } else {
             io_address = cap_io_page_table_cap_get_capIOPTMappedAddress(io_pt_cap);
-            lu_ret = lookupIOPTSlot_resolve_levels(vtd_pte, io_address >> PAGE_BITS, level - 1, level - 1 );
+            lu_ret = lookupIOPTSlot_resolve_levels(vtd_pte, io_address >> PAGE_BITS, level - 1, level - 1);
 
             /* if we have been overmapped or something */
             if (lu_ret.status != EXCEPTION_NONE || lu_ret.level != 0) {
                 return;
             }
-            if (vtd_pte_ptr_get_addr(lu_ret.ioptSlot) != pptr_to_paddr((void *)cap_io_page_table_cap_get_capIOPTBasePtr(io_pt_cap))) {
+            if (vtd_pte_ptr_get_addr(lu_ret.ioptSlot) != pptr_to_paddr((void *)cap_io_page_table_cap_get_capIOPTBasePtr(
+                                                                           io_pt_cap))) {
                 return;
             }
             *lu_ret.ioptSlot = vtd_pte_new(
@@ -11066,8 +11196,8 @@ void unmapIOPage(cap_t cap)
 {
     lookupIOPTSlot_ret_t lu_ret;
     word_t               io_address;
-    vtd_cte_t*           vtd_context_slot;
-    vtd_pte_t*           vtd_pte;
+    vtd_cte_t           *vtd_context_slot;
+    vtd_pte_t           *vtd_pte;
 
     io_address  = cap_frame_cap_get_capFMappedAddress(cap);
     vtd_context_slot = lookup_vtd_context_slot(cap);
@@ -11077,7 +11207,7 @@ void unmapIOPage(cap_t cap)
         return;
     }
 
-    vtd_pte = (vtd_pte_t*)paddr_to_pptr(vtd_cte_ptr_get_asr(vtd_context_slot));
+    vtd_pte = (vtd_pte_t *)paddr_to_pptr(vtd_cte_ptr_get_asr(vtd_context_slot));
 
     lu_ret  = lookupIOPTSlot(vtd_pte, io_address);
     if (lu_ret.status != EXCEPTION_NONE || lu_ret.level != 0) {
@@ -11098,8 +11228,7 @@ void unmapIOPage(cap_t cap)
     invalidate_iotlb();
 }
 
-exception_t
-performX86IOUnMapInvocation(cap_t cap, cte_t *ctSlot)
+exception_t performX86IOUnMapInvocation(cap_t cap, cte_t *ctSlot)
 {
     unmapIOPage(ctSlot->cap);
 
@@ -11118,15 +11247,11 @@ exception_t decodeX86IOSpaceInvocation(word_t invLabel, cap_t cap)
 }
 
 #endif /* CONFIG_IOMMU */
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/object/objecttype.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -11134,8 +11259,8 @@ exception_t decodeX86IOSpaceInvocation(word_t invLabel, cap_t cap)
 #include <api/failures.h>
 #include <kernel/vspace.h>
 #include <object/structures.h>
-#include <arch/x86/arch/machine.h>
-#include <arch/x86/arch/model/statedata.h>
+#include <arch/machine.h>
+#include <arch/model/statedata.h>
 #include <machine/fpu.h>
 #include <arch/object/objecttype.h>
 #include <arch/object/ioport.h>
@@ -11145,7 +11270,7 @@ exception_t decodeX86IOSpaceInvocation(word_t invLabel, cap_t cap)
 #include <arch/object/vcpu.h>
 #include <plat/machine/intel-vtd.h>
 
-deriveCap_ret_t Arch_deriveCap(cte_t* slot, cap_t cap)
+deriveCap_ret_t Arch_deriveCap(cte_t *slot, cap_t cap)
 {
     deriveCap_ret_t ret;
 
@@ -11273,9 +11398,9 @@ cap_t CONST Arch_updateCapData(bool_t preserve, word_t data, cap_t cap)
         uint16_t PCIDevice = io_space_capdata_get_PCIDevice(w);
         uint16_t domainID = io_space_capdata_get_domainID(w);
         if (!preserve && cap_io_space_cap_get_capPCIDevice(cap) == 0 &&
-                domainID >= x86KSFirstValidIODomain &&
-                domainID != 0                        &&
-                domainID <= MASK(x86KSnumIODomainIDBits)) {
+            domainID >= x86KSFirstValidIODomain &&
+            domainID != 0                        &&
+            domainID <= MASK(x86KSnumIODomainIDBits)) {
             return cap_io_space_cap_new(domainID, PCIDevice);
         } else {
             return cap_null_cap_new();
@@ -11373,7 +11498,7 @@ finaliseCap_ret_t Arch_finaliseCap(cap_t cap, bool_t final)
     case cap_ept_pml4_cap:
         if (final && cap_ept_pml4_cap_get_capPML4IsMapped(cap)) {
             deleteEPTASID(cap_ept_pml4_cap_get_capPML4MappedASID(cap),
-                          (ept_pml4e_t*)cap_ept_pml4_cap_get_capPML4BasePtr(cap));
+                          (ept_pml4e_t *)cap_ept_pml4_cap_get_capPML4BasePtr(cap));
         }
         break;
 
@@ -11382,7 +11507,7 @@ finaliseCap_ret_t Arch_finaliseCap(cap_t cap, bool_t final)
             unmapEPTPDPT(
                 cap_ept_pdpt_cap_get_capPDPTMappedASID(cap),
                 cap_ept_pdpt_cap_get_capPDPTMappedAddress(cap),
-                (ept_pdpte_t*)cap_ept_pdpt_cap_get_capPDPTBasePtr(cap));
+                (ept_pdpte_t *)cap_ept_pdpt_cap_get_capPDPTBasePtr(cap));
         }
         break;
 
@@ -11391,7 +11516,7 @@ finaliseCap_ret_t Arch_finaliseCap(cap_t cap, bool_t final)
             unmapEPTPageDirectory(
                 cap_ept_pd_cap_get_capPDMappedASID(cap),
                 cap_ept_pd_cap_get_capPDMappedAddress(cap),
-                (ept_pde_t*)cap_ept_pd_cap_get_capPDBasePtr(cap));
+                (ept_pde_t *)cap_ept_pd_cap_get_capPDBasePtr(cap));
         }
         break;
 
@@ -11400,7 +11525,7 @@ finaliseCap_ret_t Arch_finaliseCap(cap_t cap, bool_t final)
             unmapEPTPageTable(
                 cap_ept_pt_cap_get_capPTMappedASID(cap),
                 cap_ept_pt_cap_get_capPTMappedAddress(cap),
-                (ept_pte_t*)cap_ept_pt_cap_get_capPTBasePtr(cap));
+                (ept_pte_t *)cap_ept_pt_cap_get_capPTBasePtr(cap));
         }
         break;
 #endif
@@ -11422,8 +11547,8 @@ bool_t CONST Arch_sameRegionAs(cap_t cap_a, cap_t cap_b)
             word_t botA, botB, topA, topB;
             botA = cap_frame_cap_get_capFBasePtr(cap_a);
             botB = cap_frame_cap_get_capFBasePtr(cap_b);
-            topA = botA + MASK (pageBitsForSize(cap_frame_cap_get_capFSize(cap_a)));
-            topB = botB + MASK (pageBitsForSize(cap_frame_cap_get_capFSize(cap_b)));
+            topA = botA + MASK(pageBitsForSize(cap_frame_cap_get_capFSize(cap_a)));
+            topB = botB + MASK(pageBitsForSize(cap_frame_cap_get_capFSize(cap_b)));
             return ((botA <= botB) && (topA >= topB) && (botB <= topB));
         }
         break;
@@ -11457,7 +11582,7 @@ bool_t CONST Arch_sameRegionAs(cap_t cap_a, cap_t cap_b)
 
     case cap_io_port_control_cap:
         if (cap_get_capType(cap_b) == cap_io_port_control_cap ||
-                cap_get_capType(cap_b) == cap_io_port_cap) {
+            cap_get_capType(cap_b) == cap_io_port_cap) {
             return true;
         }
         break;
@@ -11533,7 +11658,7 @@ bool_t CONST Arch_sameRegionAs(cap_t cap_a, cap_t cap_b)
 bool_t CONST Arch_sameObjectAs(cap_t cap_a, cap_t cap_b)
 {
     if (cap_get_capType(cap_a) == cap_io_port_control_cap &&
-            cap_get_capType(cap_b) == cap_io_port_cap) {
+        cap_get_capType(cap_b) == cap_io_port_cap) {
         return false;
     }
     if (cap_get_capType(cap_a) == cap_frame_cap) {
@@ -11549,8 +11674,7 @@ bool_t CONST Arch_sameObjectAs(cap_t cap_a, cap_t cap_b)
     return Arch_sameRegionAs(cap_a, cap_b);
 }
 
-word_t
-Arch_getObjectSize(word_t t)
+word_t Arch_getObjectSize(word_t t)
 {
     switch (t) {
     case seL4_X86_4K:
@@ -11582,8 +11706,7 @@ Arch_getObjectSize(word_t t)
     }
 }
 
-cap_t
-Arch_createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMemory)
+cap_t Arch_createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMemory)
 {
 #ifdef CONFIG_VTX
     switch (t) {
@@ -11628,48 +11751,45 @@ Arch_createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMe
 #endif
 }
 
-exception_t
-Arch_decodeInvocation(
+exception_t Arch_decodeInvocation(
     word_t invLabel,
     word_t length,
     cptr_t cptr,
-    cte_t* slot,
+    cte_t *slot,
     cap_t cap,
-    extra_caps_t excaps,
     bool_t call,
-    word_t* buffer
+    word_t *buffer
 )
 {
     switch (cap_get_capType(cap)) {
     case cap_asid_control_cap:
     case cap_asid_pool_cap:
-        return decodeX86MMUInvocation(invLabel, length, cptr, slot, cap, excaps, buffer);
+        return decodeX86MMUInvocation(invLabel, length, cptr, slot, cap, call, buffer);
     case cap_io_port_control_cap:
-        return decodeX86PortControlInvocation(invLabel, length, cptr, slot, cap, excaps, buffer);
+        return decodeX86PortControlInvocation(invLabel, length, cptr, slot, cap, buffer);
     case cap_io_port_cap:
-        return decodeX86PortInvocation(invLabel, length, cptr, slot, cap, excaps, call, buffer);
+        return decodeX86PortInvocation(invLabel, length, cptr, slot, cap, call, buffer);
 #ifdef CONFIG_IOMMU
     case cap_io_space_cap:
         return decodeX86IOSpaceInvocation(invLabel, cap);
     case cap_io_page_table_cap:
-        return decodeX86IOPTInvocation(invLabel, length, slot, cap, excaps, buffer);
+        return decodeX86IOPTInvocation(invLabel, length, slot, cap, buffer);
 #endif
 #ifdef CONFIG_VTX
     case cap_vcpu_cap:
-        return decodeX86VCPUInvocation(invLabel, length, cptr, slot, cap, excaps, buffer);
+        return decodeX86VCPUInvocation(invLabel, length, cptr, slot, cap, call, buffer);
     case cap_ept_pml4_cap:
     case cap_ept_pdpt_cap:
     case cap_ept_pd_cap:
     case cap_ept_pt_cap:
-        return decodeX86EPTInvocation(invLabel, length, cptr, slot, cap, excaps, buffer);
+        return decodeX86EPTInvocation(invLabel, length, cptr, slot, cap, buffer);
 #endif
     default:
-        return Mode_decodeInvocation(invLabel, length, cptr, slot, cap, excaps, buffer);
+        return Mode_decodeInvocation(invLabel, length, cptr, slot, cap, call, buffer);
     }
 }
 
-void
-Arch_prepareThreadDelete(tcb_t *thread)
+void Arch_prepareThreadDelete(tcb_t *thread)
 {
     /* Notify the lazy FPU module about this thread's deletion. */
     fpuThreadDelete(thread);
@@ -11684,15 +11804,11 @@ void Arch_postCapDeletion(cap_t cap)
         freeIOPortRange(first_port, last_port);
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/object/tcb.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <types.h>
@@ -11700,7 +11816,7 @@ void Arch_postCapDeletion(cap_t cap)
 #include <machine/registerset.h>
 #include <object/structures.h>
 #include <arch/object/tcb.h>
-#include <arch/x86/arch/machine.h>
+#include <arch/machine.h>
 
 word_t CONST Arch_decodeTransfer(word_t flags)
 {
@@ -11735,13 +11851,13 @@ static exception_t performSetEPTRoot(tcb_t *tcb, cap_t cap, cte_t *slot)
     return EXCEPTION_NONE;
 }
 
-exception_t decodeSetEPTRoot(cap_t cap, extra_caps_t excaps)
+exception_t decodeSetEPTRoot(cap_t cap)
 {
     cap_t rootCap;
     cte_t *rootSlot;
     deriveCap_ret_t dc_ret;
 
-    rootSlot = excaps.excaprefs[0];
+    rootSlot = current_extra_caps.excaprefs[0];
 
     if (rootSlot == NULL) {
         userError("TCB SetEPTRoot: Truncated message.");
@@ -11773,31 +11889,23 @@ exception_t decodeSetEPTRoot(cap_t cap, extra_caps_t excaps)
 #endif
 
 #ifdef ENABLE_SMP_SUPPORT
-void
-Arch_migrateTCB(tcb_t *thread)
+void Arch_migrateTCB(tcb_t *thread)
 {
+#ifdef CONFIG_KERNEL_MCS
+    assert(thread->tcbSchedContext != NULL);
+#endif
+
     /* check if thread own its current core FPU */
     if (nativeThreadUsingFPU(thread)) {
         switchFpuOwner(NULL, thread->tcbAffinity);
     }
 }
 #endif /* ENABLE_SMP_SUPPORT */
-
-void
-Arch_setTCBIPCBuffer(tcb_t *thread, word_t bufferAddr)
-{
-}
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/object/vcpu.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -11811,11 +11919,11 @@ Arch_setTCBIPCBuffer(tcb_t *thread, word_t bufferAddr)
 #include <kernel/thread.h>
 #include <object/objecttype.h>
 #include <arch/machine/cpu_registers.h>
-#include <arch/x86/arch/model/statedata.h>
+#include <arch/model/statedata.h>
 #include <arch/object/vcpu.h>
 #include <arch/object/ioport.h>
 #include <util.h>
-#include <arch/api/vmenter.h>
+#include <sel4/arch/vmenter.h>
 
 #define VMX_EXIT_QUAL_TYPE_MOV_CR 0
 #define VMX_EXIT_QUAL_TYPE_CLTS 2
@@ -11879,8 +11987,7 @@ static bool_t vmx_feature_ack_on_exit;
 static vcpu_t *x86KSVPIDTable[VPID_LAST + 1];
 static vpid_t x86KSNextVPID = VPID_FIRST;
 
-static inline bool_t
-vmxon(paddr_t vmxon_region)
+static inline bool_t vmxon(paddr_t vmxon_region)
 {
     uint8_t error;
     /* vmxon requires a 64bit memory address, so perform a
@@ -11895,12 +12002,11 @@ vmxon(paddr_t vmxon_region)
     return !!error;
 }
 
-static void
-vmclear(void *vmcs_ptr)
+static void vmclear(void *vmcs_ptr)
 {
     uint64_t physical_address;
-    physical_address = pptr_to_paddr((void*)vmcs_ptr);
-    asm volatile (
+    physical_address = pptr_to_paddr((void *)vmcs_ptr);
+    asm volatile(
         "vmclear %0"
         :
         : "m"(physical_address)
@@ -11908,8 +12014,7 @@ vmclear(void *vmcs_ptr)
     );
 }
 
-void
-clearCurrentVCPU(void)
+void clearCurrentVCPU(void)
 {
     vcpu_t *vcpu = ARCH_NODE_STATE(x86KSCurrentVCPU);
     if (vcpu) {
@@ -11919,13 +12024,12 @@ clearCurrentVCPU(void)
     }
 }
 
-static void
-vmptrld(void *vmcs_ptr)
+static void vmptrld(void *vmcs_ptr)
 {
     uint64_t physical_address;
     uint8_t error;
     physical_address = pptr_to_paddr(vmcs_ptr);
-    asm volatile (
+    asm volatile(
         "vmptrld %1; setna %0"
         : "=q"(error)
         : "m"(physical_address)
@@ -11937,8 +12041,7 @@ vmptrld(void *vmcs_ptr)
     assert(!error);
 }
 
-static void
-switchVCPU(vcpu_t *vcpu)
+static void switchVCPU(vcpu_t *vcpu)
 {
 #ifdef ENABLE_SMP_SUPPORT
     if (vcpu->last_cpu != getCurrentCPUIndex() && ARCH_NODE_STATE_ON_CORE(x86KSCurrentVCPU, vcpu->last_cpu) == vcpu) {
@@ -11954,15 +12057,15 @@ switchVCPU(vcpu_t *vcpu)
         vmwrite(VMX_HOST_TR_BASE, (word_t)&x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss);
         vmwrite(VMX_HOST_GDTR_BASE, (word_t)x86KSGlobalState[CURRENT_CPU_INDEX()].x86KSgdt);
         vmwrite(VMX_HOST_IDTR_BASE, (word_t)x86KSGlobalState[CURRENT_CPU_INDEX()].x86KSidt);
-        vmwrite(VMX_HOST_SYSENTER_ESP, (uint64_t)(word_t)((char *)&x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.tss.words[0] + 4));
+        vmwrite(VMX_HOST_SYSENTER_ESP, (uint64_t)(word_t)((char *)&x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.tss.words[0] +
+                                                          4));
     }
     vcpu->last_cpu = getCurrentCPUIndex();
 #endif
     ARCH_NODE_STATE(x86KSCurrentVCPU) = vcpu;
 }
 
-static void
-print_bits(word_t bits)
+static void print_bits(word_t bits)
 {
     bool_t first = true;
     while (bits) {
@@ -11977,8 +12080,7 @@ print_bits(word_t bits)
     }
 }
 
-static bool_t
-check_fixed_value(word_t val, word_t low, word_t high)
+static bool_t check_fixed_value(word_t val, word_t low, word_t high)
 {
     word_t not_high;
     word_t not_low;
@@ -12007,8 +12109,7 @@ check_fixed_value(word_t val, word_t low, word_t high)
     return true;
 }
 
-static bool_t
-vtx_check_fixed_values(word_t cr0, word_t cr4)
+static bool_t vtx_check_fixed_values(word_t cr0, word_t cr4)
 {
     if (!check_fixed_value(cr0, cr0_low, cr0_high)) {
         printf(" of CR0\n");
@@ -12021,8 +12122,7 @@ vtx_check_fixed_values(word_t cr0, word_t cr4)
     return true;
 }
 
-static bool_t BOOT_CODE
-init_vtx_fixed_values(bool_t useTrueMsrs)
+static bool_t BOOT_CODE init_vtx_fixed_values(bool_t useTrueMsrs)
 {
     uint32_t pin_control_mask =
         BIT(0) |    //Extern interrupt exiting
@@ -12134,8 +12234,7 @@ init_vtx_fixed_values(bool_t useTrueMsrs)
     return true;
 }
 
-static bool_t BOOT_CODE
-check_vtx_fixed_values(bool_t useTrueMsrs)
+static bool_t BOOT_CODE check_vtx_fixed_values(bool_t useTrueMsrs)
 {
     uint32_t pinbased_ctls;
     uint32_t procbased_ctls;
@@ -12192,16 +12291,14 @@ check_vtx_fixed_values(bool_t useTrueMsrs)
         local_cr4_low == cr4_low;
 }
 
-static inline uint32_t
-applyFixedBits(uint32_t original, uint32_t high, uint32_t low)
+static inline uint32_t applyFixedBits(uint32_t original, uint32_t high, uint32_t low)
 {
     original |= high;
     original &= low;
     return original;
 }
 
-void
-vcpu_init(vcpu_t *vcpu)
+void vcpu_init(vcpu_t *vcpu)
 {
     vcpu->vcpuTCB = NULL;
     vcpu->launched = false;
@@ -12237,7 +12334,8 @@ vcpu_init(vcpu_t *vcpu)
     vmwrite(VMX_HOST_SYSENTER_CS, (word_t)SEL_CS_0);
     vmwrite(VMX_HOST_SYSENTER_EIP, (word_t)&handle_syscall);
     if (!config_set(CONFIG_HARDWARE_DEBUG_API)) {
-        vmwrite(VMX_HOST_SYSENTER_ESP, (uint64_t)(word_t)((char *)&x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.tss.words[0] + 4));
+        vmwrite(VMX_HOST_SYSENTER_ESP, (uint64_t)(word_t)((char *)&x86KSGlobalState[CURRENT_CPU_INDEX()].x86KStss.tss.words[0] +
+                                                          4));
     }
     /* Set host SP to point just beyond the first field to be stored on exit. */
     vmwrite(VMX_HOST_RSP, (word_t)&vcpu->gp_registers[n_vcpu_gp_register]);
@@ -12274,8 +12372,7 @@ vcpu_init(vcpu_t *vcpu)
     vmwrite(VMX_CONTROL_IOB_ADDRESS, pptr_to_paddr((char *)vcpu->io + (VCPU_IOBITMAP_SIZE / 2)));
 }
 
-static void
-dissociateVcpuTcb(tcb_t *tcb, vcpu_t *vcpu)
+static void dissociateVcpuTcb(tcb_t *tcb, vcpu_t *vcpu)
 {
     assert(tcb->tcbArch.tcbVCPU == vcpu);
     assert(vcpu->vcpuTCB == tcb);
@@ -12283,15 +12380,14 @@ dissociateVcpuTcb(tcb_t *tcb, vcpu_t *vcpu)
     vcpu->vcpuTCB = NULL;
 }
 
-void
-vcpu_finalise(vcpu_t *vcpu)
+void vcpu_finalise(vcpu_t *vcpu)
 {
     if (vcpu->vcpuTCB) {
         dissociateVcpuTcb(vcpu->vcpuTCB, vcpu);
     }
     if (ARCH_NODE_STATE_ON_CORE(x86KSCurrentVCPU, vcpu->last_cpu) == vcpu) {
 #ifdef ENABLE_SMP_SUPPORT
-        if (vcpu->last_cpu == getCurrentCPUIndex()) {
+        if (vcpu->last_cpu != getCurrentCPUIndex()) {
             doRemoteClearCurrentVCPU(vcpu->last_cpu);
         } else
 #endif /* ENABLE_SMP_SUPPORT */
@@ -12301,8 +12397,7 @@ vcpu_finalise(vcpu_t *vcpu)
     }
 }
 
-static void
-associateVcpuTcb(tcb_t *tcb, vcpu_t *vcpu)
+static void associateVcpuTcb(tcb_t *tcb, vcpu_t *vcpu)
 {
     if (tcb->tcbArch.tcbVCPU) {
         dissociateVcpuTcb(tcb, tcb->tcbArch.tcbVCPU);
@@ -12314,8 +12409,7 @@ associateVcpuTcb(tcb_t *tcb, vcpu_t *vcpu)
     tcb->tcbArch.tcbVCPU = vcpu;
 }
 
-static exception_t
-invokeVCPUWriteRegisters(vcpu_t *vcpu, word_t *buffer)
+static exception_t invokeVCPUWriteRegisters(vcpu_t *vcpu, word_t *buffer)
 {
     int i;
     for (i = 0; i < n_vcpu_gp_register; i++) {
@@ -12325,8 +12419,7 @@ invokeVCPUWriteRegisters(vcpu_t *vcpu, word_t *buffer)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeVCPUWriteRegisters(cap_t cap, word_t length, word_t *buffer)
+static exception_t decodeVCPUWriteRegisters(cap_t cap, word_t length, word_t *buffer)
 {
     if (length < 7) {
         userError("VCPU WriteRegisters: Truncated message.");
@@ -12336,8 +12429,7 @@ decodeVCPUWriteRegisters(cap_t cap, word_t length, word_t *buffer)
     return invokeVCPUWriteRegisters(VCPU_PTR(cap_vcpu_cap_get_capVCPUPtr(cap)), buffer);
 }
 
-static exception_t
-invokeEnableIOPort(vcpu_t *vcpu, cte_t *slot, cap_t cap, uint16_t low, uint16_t high)
+static exception_t invokeEnableIOPort(vcpu_t *vcpu, cte_t *slot, cap_t cap, uint16_t low, uint16_t high)
 {
     /* remove any existing io ports from this cap */
     clearVPIDIOPortMappings(cap_io_port_cap_get_capIOPortVPID(cap),
@@ -12352,8 +12444,7 @@ invokeEnableIOPort(vcpu_t *vcpu, cte_t *slot, cap_t cap, uint16_t low, uint16_t 
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeEnableIOPort(cap_t cap, word_t length, word_t* buffer, extra_caps_t excaps)
+static exception_t decodeEnableIOPort(cap_t cap, word_t length, word_t *buffer)
 {
     vcpu_t *vcpu;
     cap_t ioCap;
@@ -12365,13 +12456,13 @@ decodeEnableIOPort(cap_t cap, word_t length, word_t* buffer, extra_caps_t excaps
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
-    if (excaps.excaprefs[0] == NULL) {
+    if (current_extra_caps.excaprefs[0] == NULL) {
         userError("VCPU EnableIOPort: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
-    ioSlot = excaps.excaprefs[0];
-    ioCap  = excaps.excaprefs[0]->cap;
+    ioSlot = current_extra_caps.excaprefs[0];
+    ioCap  = current_extra_caps.excaprefs[0]->cap;
 
     if (cap_get_capType(ioCap) != cap_io_port_cap) {
         userError("VCPU EnableIOPort: IOPort cap is not a IOPort cap.");
@@ -12395,22 +12486,20 @@ decodeEnableIOPort(cap_t cap, word_t length, word_t* buffer, extra_caps_t excaps
     return invokeEnableIOPort(vcpu, ioSlot, ioCap, low, high);
 }
 
-static exception_t
-invokeDisableIOPort(vcpu_t *vcpu, uint16_t low, uint16_t high)
+static exception_t invokeDisableIOPort(vcpu_t *vcpu, uint16_t low, uint16_t high)
 {
     setIOPortMask(vcpu->io, low, high, true);
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeDisableIOPort(cap_t cap, word_t length, word_t* buffer)
+static exception_t decodeDisableIOPort(cap_t cap, word_t length, word_t *buffer)
 {
     vcpu_t *vcpu;
     uint16_t low, high;
 
     if (length < 2) {
-        userError("VCPU EnableIOPort: Truncated message.");
+        userError("VCPU DisableIOPort: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
@@ -12423,11 +12512,11 @@ decodeDisableIOPort(cap_t cap, word_t length, word_t* buffer)
     return invokeDisableIOPort(vcpu, low, high);
 }
 
-static exception_t
-invokeWriteVMCS(vcpu_t *vcpu, word_t *buffer, word_t field, word_t value)
+static exception_t invokeWriteVMCS(vcpu_t *vcpu, bool_t call, word_t *buffer, word_t field, word_t value)
 {
     tcb_t *thread;
     thread = NODE_STATE(ksCurThread);
+
     if (ARCH_NODE_STATE(x86KSCurrentVCPU) != vcpu) {
         switchVCPU(vcpu);
     }
@@ -12445,14 +12534,19 @@ invokeWriteVMCS(vcpu_t *vcpu, word_t *buffer, word_t field, word_t value)
         vcpu->cr0_shadow = vcpu->cached_cr0_shadow = value;
         break;
     }
-    setMR(thread, buffer, 0, value);
     vmwrite(field, value);
-    setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+
+    if (call) {
+        setRegister(thread, badgeRegister, 0);
+        unsigned int length = setMR(thread, buffer, 0, value);
+        setRegister(thread, msgInfoRegister, wordFromMessageInfo(
+                        seL4_MessageInfo_new(0, 0, 0, length)));
+    }
+    setThreadState(NODE_STATE(ksCurThread), ThreadState_Running);
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeWriteVMCS(cap_t cap, word_t length, word_t* buffer)
+static exception_t decodeWriteVMCS(cap_t cap, word_t length, bool_t call, word_t *buffer)
 {
     word_t field;
     word_t value;
@@ -12554,7 +12648,7 @@ decodeWriteVMCS(cap_t cap, word_t length, word_t* buffer)
         current_syscall_error.type = seL4_IllegalOperation;
         return EXCEPTION_SYSCALL_ERROR;
     }
-    return invokeWriteVMCS(VCPU_PTR(cap_vcpu_cap_get_capVCPUPtr(cap)), buffer, field, value);
+    return invokeWriteVMCS(VCPU_PTR(cap_vcpu_cap_get_capVCPUPtr(cap)), call, buffer, field, value);
 }
 
 static word_t readVMCSField(vcpu_t *vcpu, word_t field)
@@ -12575,21 +12669,22 @@ static word_t readVMCSField(vcpu_t *vcpu, word_t field)
     return vmread(field);
 }
 
-static exception_t
-invokeReadVMCS(vcpu_t *vcpu, word_t field, word_t *buffer)
+static exception_t invokeReadVMCS(vcpu_t *vcpu, word_t field, bool_t call, word_t *buffer)
 {
     tcb_t *thread;
     thread = NODE_STATE(ksCurThread);
-
-    setMR(thread, buffer, 0, readVMCSField(vcpu, field));
-    setRegister(thread, msgInfoRegister, wordFromMessageInfo(
-                    seL4_MessageInfo_new(0, 0, 0, 1)));
-    setThreadState(thread, ThreadState_Restart);
+    word_t value = readVMCSField(vcpu, field);
+    if (call) {
+        setRegister(thread, badgeRegister, 0);
+        unsigned int length = setMR(thread, buffer, 0, value);
+        setRegister(thread, msgInfoRegister, wordFromMessageInfo(
+                        seL4_MessageInfo_new(0, 0, 0, length)));
+    }
+    setThreadState(NODE_STATE(ksCurThread), ThreadState_Running);
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeReadVMCS(cap_t cap, word_t length, word_t* buffer)
+static exception_t decodeReadVMCS(cap_t cap, word_t length, bool_t call, word_t *buffer)
 {
     if (length < 1) {
         userError("VCPU ReadVMCS: Not enough arguments.");
@@ -12685,11 +12780,10 @@ decodeReadVMCS(cap_t cap, word_t length, word_t* buffer)
         current_syscall_error.type = seL4_IllegalOperation;
         return EXCEPTION_SYSCALL_ERROR;
     }
-    return invokeReadVMCS(VCPU_PTR(cap_vcpu_cap_get_capVCPUPtr(cap)), field, buffer);
+    return invokeReadVMCS(VCPU_PTR(cap_vcpu_cap_get_capVCPUPtr(cap)), field, call, buffer);
 }
 
-static exception_t
-invokeSetTCB(vcpu_t *vcpu, tcb_t *tcb)
+static exception_t invokeSetTCB(vcpu_t *vcpu, tcb_t *tcb)
 {
     associateVcpuTcb(tcb, vcpu);
 
@@ -12697,16 +12791,15 @@ invokeSetTCB(vcpu_t *vcpu, tcb_t *tcb)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeSetTCB(cap_t cap, word_t length, word_t* buffer, extra_caps_t excaps)
+static exception_t decodeSetTCB(cap_t cap, word_t length, word_t *buffer)
 {
     cap_t tcbCap;
-    if ( excaps.excaprefs[0] == NULL) {
+    if (current_extra_caps.excaprefs[0] == NULL) {
         userError("VCPU SetTCB: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
-    tcbCap  = excaps.excaprefs[0]->cap;
+    tcbCap  = current_extra_caps.excaprefs[0]->cap;
 
     if (cap_get_capType(tcbCap) != cap_thread_cap) {
         userError("TCB cap is not a TCB cap.");
@@ -12717,8 +12810,7 @@ decodeSetTCB(cap_t cap, word_t length, word_t* buffer, extra_caps_t excaps)
     return invokeSetTCB(VCPU_PTR(cap_vcpu_cap_get_capVCPUPtr(cap)), TCB_PTR(cap_thread_cap_get_capTCBPtr(tcbCap)));
 }
 
-void
-vcpu_update_state_sysvmenter(vcpu_t *vcpu)
+void vcpu_update_state_sysvmenter(vcpu_t *vcpu)
 {
     word_t *buffer;
     if (ARCH_NODE_STATE(x86KSCurrentVCPU) != vcpu) {
@@ -12730,12 +12822,12 @@ vcpu_update_state_sysvmenter(vcpu_t *vcpu)
         return;
     }
     vmwrite(VMX_GUEST_RIP, getSyscallArg(0, buffer));
-    vmwrite(VMX_CONTROL_PRIMARY_PROCESSOR_CONTROLS, applyFixedBits(getSyscallArg(1, buffer), primary_control_high, primary_control_low));
+    vmwrite(VMX_CONTROL_PRIMARY_PROCESSOR_CONTROLS, applyFixedBits(getSyscallArg(1, buffer), primary_control_high,
+                                                                   primary_control_low));
     vmwrite(VMX_CONTROL_ENTRY_INTERRUPTION_INFO, getSyscallArg(2, buffer));
 }
 
-void
-vcpu_sysvmenter_reply_to_user(tcb_t *tcb)
+void vcpu_sysvmenter_reply_to_user(tcb_t *tcb)
 {
     word_t *buffer;
     vcpu_t *vcpu;
@@ -12756,26 +12848,25 @@ vcpu_sysvmenter_reply_to_user(tcb_t *tcb)
     setRegister(tcb, msgInfoRegister, 0);
 }
 
-exception_t
-decodeX86VCPUInvocation(
+exception_t decodeX86VCPUInvocation(
     word_t invLabel,
     word_t length,
     cptr_t cptr,
-    cte_t* slot,
+    cte_t *slot,
     cap_t cap,
-    extra_caps_t excaps,
-    word_t* buffer
+    bool_t call,
+    word_t *buffer
 )
 {
     switch (invLabel) {
     case X86VCPUSetTCB:
-        return decodeSetTCB(cap, length, buffer, excaps);
+        return decodeSetTCB(cap, length, buffer);
     case X86VCPUReadVMCS:
-        return decodeReadVMCS(cap, length, buffer);
+        return decodeReadVMCS(cap, length, call, buffer);
     case X86VCPUWriteVMCS:
-        return decodeWriteVMCS(cap, length, buffer);
+        return decodeWriteVMCS(cap, length, call, buffer);
     case X86VCPUEnableIOPort:
-        return decodeEnableIOPort(cap, length, buffer, excaps);
+        return decodeEnableIOPort(cap, length, buffer);
     case X86VCPUDisableIOPort:
         return decodeDisableIOPort(cap, length, buffer);
     case X86VCPUWriteRegisters:
@@ -12787,24 +12878,21 @@ decodeX86VCPUInvocation(
     }
 }
 
-static bool_t
-is_vtx_supported(void)
+static bool_t is_vtx_supported(void)
 {
     /* check for VMX support in CPUID
      * see section 23.7 of Volume 3 of the Intel manual */
     return !!(x86_cpuid_ecx(0x1, 0) & BIT(5));
 }
 
-static inline void
-clear_bit(word_t *bitmap, word_t bit)
+static inline void clear_bit(word_t *bitmap, word_t bit)
 {
     int index = bit / (sizeof(word_t) * 8);
     int offset = bit % (sizeof(word_t) * 8);
     bitmap[index] &= ~BIT(offset);
 }
 
-BOOT_CODE bool_t
-vtx_init(void)
+BOOT_CODE bool_t vtx_init(void)
 {
     if (!is_vtx_supported()) {
         printf("vt-x: not supported\n");
@@ -12832,7 +12920,7 @@ vtx_init(void)
     }
     /* Initialize the fixed values only on the boot core. All other cores
      * will just check that the fixed values are valid */
-    if (SMP_TERNARY(getCurrentCPUIndex(), 0) == 0) {
+    if (CURRENT_CPU_INDEX() == 0) {
         if (!init_vtx_fixed_values(vmx_basic_msr_get_true_msrs(vmx_basic))) {
             printf("vt-x: lack of required features\n");
             return false;
@@ -12882,8 +12970,7 @@ vtx_init(void)
     return true;
 }
 
-static void
-setMRs_vmexit(uint32_t reason, word_t qualification)
+static void setMRs_vmexit(uint32_t reason, word_t qualification)
 {
     word_t *buffer;
     int i;
@@ -12891,7 +12978,8 @@ setMRs_vmexit(uint32_t reason, word_t qualification)
     buffer = lookupIPCBuffer(true, NODE_STATE(ksCurThread));
 
     setMR(NODE_STATE(ksCurThread), buffer, SEL4_VMENTER_CALL_EIP_MR, vmread(VMX_GUEST_RIP));
-    setMR(NODE_STATE(ksCurThread), buffer, SEL4_VMENTER_CALL_CONTROL_PPC_MR, vmread(VMX_CONTROL_PRIMARY_PROCESSOR_CONTROLS));
+    setMR(NODE_STATE(ksCurThread), buffer, SEL4_VMENTER_CALL_CONTROL_PPC_MR,
+          vmread(VMX_CONTROL_PRIMARY_PROCESSOR_CONTROLS));
     setMR(NODE_STATE(ksCurThread), buffer, SEL4_VMENTER_CALL_CONTROL_ENTRY_MR, vmread(VMX_CONTROL_ENTRY_INTERRUPTION_INFO));
     setMR(NODE_STATE(ksCurThread), buffer, SEL4_VMENTER_FAULT_REASON_MR, reason);
     setMR(NODE_STATE(ksCurThread), buffer, SEL4_VMENTER_FAULT_QUALIFICATION_MR, qualification);
@@ -12903,12 +12991,12 @@ setMRs_vmexit(uint32_t reason, word_t qualification)
     setMR(NODE_STATE(ksCurThread), buffer, SEL4_VMENTER_FAULT_CR3_MR, vmread(VMX_GUEST_CR3));
 
     for (i = 0; i < n_vcpu_gp_register; i++) {
-        setMR(NODE_STATE(ksCurThread), buffer, SEL4_VMENTER_FAULT_EAX + i, NODE_STATE(ksCurThread)->tcbArch.tcbVCPU->gp_registers[i]);
+        setMR(NODE_STATE(ksCurThread), buffer, SEL4_VMENTER_FAULT_EAX + i,
+              NODE_STATE(ksCurThread)->tcbArch.tcbVCPU->gp_registers[i]);
     }
 }
 
-static void
-handleVmxFault(uint32_t reason, word_t qualification)
+static void handleVmxFault(uint32_t reason, word_t qualification)
 {
     /* Indicate that we are returning the from VMEnter with a fault */
     setRegister(NODE_STATE(ksCurThread), msgInfoRegister, SEL4_VMENTER_RESULT_FAULT);
@@ -12923,8 +13011,7 @@ handleVmxFault(uint32_t reason, word_t qualification)
     activateThread();
 }
 
-static inline void
-finishVmexitSaving(void)
+static inline void finishVmexitSaving(void)
 {
     vcpu_t *vcpu = ARCH_NODE_STATE(x86KSCurrentVCPU);
     assert(vcpu == NODE_STATE(ksCurThread)->tcbArch.tcbVCPU);
@@ -12949,8 +13036,7 @@ finishVmexitSaving(void)
     }
 }
 
-exception_t
-handleVmexit(void)
+exception_t handleVmexit(void)
 {
     uint32_t interrupt;
     /* qualification is host width, reason is defined as being 32 bit */
@@ -13025,7 +13111,7 @@ handleVmexit(void)
                      * bits that the VCPU owner has declared that they want to own (via the cr0_shadow)
                      */
                     if (!((value ^ NODE_STATE(ksCurThread)->tcbArch.tcbVCPU->cr0_shadow) &
-                            NODE_STATE(ksCurThread)->tcbArch.tcbVCPU->cr0_mask)) {
+                          NODE_STATE(ksCurThread)->tcbArch.tcbVCPU->cr0_mask)) {
                         return EXCEPTION_NONE;
                     }
                 }
@@ -13050,7 +13136,7 @@ handleVmexit(void)
                  * the low 4 bits
                  */
                 if (!((value ^ NODE_STATE(ksCurThread)->tcbArch.tcbVCPU->cr0_shadow) &
-                        NODE_STATE(ksCurThread)->tcbArch.tcbVCPU->cr0_mask & MASK(4))) {
+                      NODE_STATE(ksCurThread)->tcbArch.tcbVCPU->cr0_mask & MASK(4))) {
                     return EXCEPTION_NONE;
                 }
                 break;
@@ -13091,8 +13177,7 @@ handleVmexit(void)
     return EXCEPTION_NONE;
 }
 
-exception_t
-handleVmEntryFail(void)
+exception_t handleVmEntryFail(void)
 {
     handleVmxFault(-1, -1);
 
@@ -13100,8 +13185,7 @@ handleVmEntryFail(void)
 }
 
 #ifdef ENABLE_SMP_SUPPORT
-void
-VMCheckBoundNotification(tcb_t *tcb)
+void VMCheckBoundNotification(tcb_t *tcb)
 {
     /* We want to check if the VM we are currently running has received
      * a message on its bound notification object. This check is done
@@ -13112,7 +13196,7 @@ VMCheckBoundNotification(tcb_t *tcb)
     assert(tcb->tcbAffinity == getCurrentCPUIndex());
     notification_t *ntfnPtr = tcb->tcbBoundNotification;
     if (thread_state_ptr_get_tsType(&tcb->tcbState) == ThreadState_RunningVM
-            && ntfnPtr && notification_ptr_get_state(ntfnPtr) == NtfnState_Active) {
+        && ntfnPtr && notification_ptr_get_state(ntfnPtr) == NtfnState_Active) {
 
         word_t badge = notification_ptr_get_ntfnMsgIdentifier(ntfnPtr);
         notification_ptr_set_state(ntfnPtr, NtfnState_Idle);
@@ -13130,8 +13214,7 @@ VMCheckBoundNotification(tcb_t *tcb)
 }
 #endif /* ENABLE_SMP_SUPPORT */
 
-static void
-invvpid_context(uint16_t vpid)
+static void invvpid_context(uint16_t vpid)
 {
     struct {
         uint64_t vpid : 16;
@@ -13141,18 +13224,17 @@ invvpid_context(uint16_t vpid)
     asm volatile("invvpid %0, %1" :: "m"(operand), "r"((word_t)1) : "cc");
 }
 
-static void
-setEPTRoot(cap_t vmxSpace, vcpu_t* vcpu)
+static void setEPTRoot(cap_t vmxSpace, vcpu_t *vcpu)
 {
     paddr_t ept_root;
     if (cap_get_capType(vmxSpace) != cap_ept_pml4_cap ||
-            !cap_ept_pml4_cap_get_capPML4IsMapped(vmxSpace)) {
+        !cap_ept_pml4_cap_get_capPML4IsMapped(vmxSpace)) {
         ept_root = kpptr_to_paddr(null_ept_space);
     } else {
         findEPTForASID_ret_t find_ret;
         ept_pml4e_t *pml4;
 
-        pml4 = (ept_pml4e_t*)cap_ept_pml4_cap_get_capPML4BasePtr(vmxSpace);
+        pml4 = (ept_pml4e_t *)cap_ept_pml4_cap_get_capPML4BasePtr(vmxSpace);
         find_ret = findEPTForASID(cap_ept_pml4_cap_get_capPML4MappedASID(vmxSpace));
         if (find_ret.status != EXCEPTION_NONE || find_ret.ept != pml4) {
             ept_root = kpptr_to_paddr(null_ept_space);
@@ -13176,8 +13258,7 @@ setEPTRoot(cap_t vmxSpace, vcpu_t* vcpu)
     }
 }
 
-static void
-handleLazyFpu(void)
+static void handleLazyFpu(void)
 {
     vcpu_t *vcpu = NODE_STATE(ksCurThread)->tcbArch.tcbVCPU;
     word_t cr0 = vcpu->cr0;
@@ -13229,8 +13310,7 @@ handleLazyFpu(void)
     }
 }
 
-void
-clearVPIDIOPortMappings(vpid_t vpid, uint16_t first, uint16_t last)
+void clearVPIDIOPortMappings(vpid_t vpid, uint16_t first, uint16_t last)
 {
     if (vpid == VPID_INVALID) {
         return;
@@ -13243,8 +13323,7 @@ clearVPIDIOPortMappings(vpid_t vpid, uint16_t first, uint16_t last)
     setIOPortMask(vcpu->io, first, last, true);
 }
 
-static inline vpid_t
-nextVPID(vpid_t vpid)
+static inline vpid_t nextVPID(vpid_t vpid)
 {
     if (vpid == VPID_LAST) {
         return VPID_FIRST;
@@ -13253,8 +13332,7 @@ nextVPID(vpid_t vpid)
     }
 }
 
-static void
-invalidateVPID(vpid_t vpid)
+static void invalidateVPID(vpid_t vpid)
 {
     vcpu_t *vcpu = x86KSVPIDTable[vpid];
     /* clear the IO bitmap as when we sever the VPID asignment we lose
@@ -13266,8 +13344,7 @@ invalidateVPID(vpid_t vpid)
     }
 }
 
-static vpid_t
-findFreeVPID(void)
+static vpid_t findFreeVPID(void)
 {
     vpid_t vpid;
 
@@ -13290,8 +13367,7 @@ findFreeVPID(void)
     return vpid;
 }
 
-static void
-storeVPID(vcpu_t *vcpu, vpid_t vpid)
+static void storeVPID(vcpu_t *vcpu, vpid_t vpid)
 {
     assert(x86KSVPIDTable[vpid] == NULL);
     assert(vcpu->vpid == VPID_INVALID);
@@ -13299,8 +13375,7 @@ storeVPID(vcpu_t *vcpu, vpid_t vpid)
     vcpu->vpid = vpid;
 }
 
-void
-restoreVMCS(void)
+void restoreVMCS(void)
 {
     vcpu_t *expected_vmcs = NODE_STATE(ksCurThread)->tcbArch.tcbVCPU;
 
@@ -13326,8 +13401,7 @@ restoreVMCS(void)
     handleLazyFpu();
 }
 
-void
-invept(ept_pml4e_t *ept_pml4)
+void invept(ept_pml4e_t *ept_pml4)
 {
     if (vmx_ept_vpid_cap_msr_get_invept(vpid_capability)) {
         struct {
@@ -13346,9 +13420,9 @@ invept(ept_pml4e_t *ept_pml4)
             return;
         }
 
-        address.parts[0] = pptr_to_paddr((void*)ept_pml4);
+        address.parts[0] = pptr_to_paddr((void *)ept_pml4);
         address.parts[1] = 0;
-        asm volatile (
+        asm volatile(
             "invept %0, %1"
             :
             : "m"(address),  "r"(type)
@@ -13358,17 +13432,11 @@ invept(ept_pml4e_t *ept_pml4)
 }
 
 #endif
-
+#line 1 "/Users/payas/git/seL4/src/arch/x86/smp/ipi.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -13380,11 +13448,11 @@ invept(ept_pml4e_t *ept_pml4)
 
 static IpiModeRemoteCall_t remoteCall;   /* the remote call being requested */
 
-static inline void init_ipi_args(IpiModeRemoteCall_t func,
+static inline void init_ipi_args(IpiRemoteCall_t func,
                                  word_t data1, word_t data2, word_t data3,
                                  word_t mask)
 {
-    remoteCall = func;
+    remoteCall = (IpiModeRemoteCall_t)func;
     ipi_args[0] = data1;
     ipi_args[1] = data2;
     ipi_args[2] = data3;
@@ -13429,7 +13497,7 @@ static void handleRemoteCall(IpiModeRemoteCall_t call, word_t arg0,
             clearCurrentVCPU();
             break;
         case IpiRemoteCall_VMCheckBoundNotification:
-            VMCheckBoundNotification((tcb_t*)arg0);
+            VMCheckBoundNotification((tcb_t *)arg0);
             break;
 #endif
         default:
@@ -13495,15 +13563,11 @@ void ipi_send_mask(irq_t ipi, word_t mask, bool_t isBlocking)
 #endif /* CONFIG_USE_LOGICAL_IDS */
 }
 #endif /* ENABLE_SMP_SUPPORT */
-
+#line 1 "/Users/payas/git/seL4/src/assert.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <assert.h>
@@ -13512,10 +13576,10 @@ void ipi_send_mask(irq_t ipi, word_t mask, bool_t isBlocking)
 #ifdef CONFIG_DEBUG_BUILD
 
 void _fail(
-    const char*  s,
-    const char*  file,
+    const char  *s,
+    const char  *file,
     unsigned int line,
-    const char*  function)
+    const char  *function)
 {
     printf(
         "seL4 called fail at %s:%u in function %s, saying \"%s\"\n",
@@ -13528,10 +13592,10 @@ void _fail(
 }
 
 void _assert_fail(
-    const char*  assertion,
-    const char*  file,
+    const char  *assertion,
+    const char  *file,
     unsigned int line,
-    const char*  function)
+    const char  *function)
 {
     printf("seL4 failed assertion '%s' at %s:%u in function %s\n",
            assertion,
@@ -13543,15 +13607,168 @@ void _assert_fail(
 }
 
 #endif
-
+#line 1 "/Users/payas/git/seL4/src/benchmark/benchmark.c"
 /*
  * Copyright 2016, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
+ * SPDX-License-Identifier: GPL-2.0-only
+ */
+
+#include <config.h>
+
+#ifdef CONFIG_ENABLE_BENCHMARKS
+
+#include <types.h>
+#include <mode/machine.h>
+#include <benchmark/benchmark.h>
+#include <benchmark/benchmark_utilisation.h>
+
+
+exception_t handle_SysBenchmarkFlushCaches(void)
+{
+#ifdef CONFIG_ARCH_ARM
+    tcb_t *thread = NODE_STATE(ksCurThread);
+    if (getRegister(thread, capRegister)) {
+        arch_clean_invalidate_L1_caches(getRegister(thread, msgInfoRegister));
+    } else {
+        arch_clean_invalidate_caches();
+    }
+#else
+    arch_clean_invalidate_caches();
+#endif
+    return EXCEPTION_NONE;
+}
+
+exception_t handle_SysBenchmarkResetLog(void)
+{
+#ifdef CONFIG_KERNEL_LOG_BUFFER
+    if (ksUserLogBuffer == 0) {
+        userError("A user-level buffer has to be set before resetting benchmark.\
+                Use seL4_BenchmarkSetLogBuffer\n");
+        setRegister(NODE_STATE(ksCurThread), capRegister, seL4_IllegalOperation);
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+
+    ksLogIndex = 0;
+#endif /* CONFIG_KERNEL_LOG_BUFFER */
+
+#ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
+    NODE_STATE(benchmark_log_utilisation_enabled) = true;
+    benchmark_track_reset_utilisation(NODE_STATE(ksIdleThread));
+    NODE_STATE(ksCurThread)->benchmark.schedule_start_time = ksEnter;
+    NODE_STATE(ksCurThread)->benchmark.number_schedules++;
+    NODE_STATE(benchmark_start_time) = ksEnter;
+    NODE_STATE(benchmark_kernel_time) = 0;
+    NODE_STATE(benchmark_kernel_number_entries) = 0;
+    NODE_STATE(benchmark_kernel_number_schedules) = 1;
+    benchmark_arch_utilisation_reset();
+#endif /* CONFIG_BENCHMARK_TRACK_UTILISATION */
+
+    setRegister(NODE_STATE(ksCurThread), capRegister, seL4_NoError);
+    return EXCEPTION_NONE;
+}
+
+exception_t handle_SysBenchmarkFinalizeLog(void)
+{
+#ifdef CONFIG_KERNEL_LOG_BUFFER
+    ksLogIndexFinalized = ksLogIndex;
+    setRegister(NODE_STATE(ksCurThread), capRegister, ksLogIndexFinalized);
+#endif /* CONFIG_KERNEL_LOG_BUFFER */
+
+#ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
+    benchmark_utilisation_finalise();
+#endif /* CONFIG_BENCHMARK_TRACK_UTILISATION */
+
+    return EXCEPTION_NONE;
+}
+
+#ifdef CONFIG_KERNEL_LOG_BUFFER
+exception_t handle_SysBenchmarkSetLogBuffer(void)
+{
+    word_t cptr_userFrame = getRegister(NODE_STATE(ksCurThread), capRegister);
+    if (benchmark_arch_map_logBuffer(cptr_userFrame) != EXCEPTION_NONE) {
+        setRegister(NODE_STATE(ksCurThread), capRegister, seL4_IllegalOperation);
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+
+    setRegister(NODE_STATE(ksCurThread), capRegister, seL4_NoError);
+    return EXCEPTION_NONE;
+}
+#endif /* CONFIG_KERNEL_LOG_BUFFER */
+
+#ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
+
+exception_t handle_SysBenchmarkGetThreadUtilisation(void)
+{
+    benchmark_track_utilisation_dump();
+    return EXCEPTION_NONE;
+}
+
+exception_t handle_SysBenchmarkResetThreadUtilisation(void)
+{
+    word_t tcb_cptr = getRegister(NODE_STATE(ksCurThread), capRegister);
+    lookupCap_ret_t lu_ret;
+    word_t cap_type;
+
+    lu_ret = lookupCap(NODE_STATE(ksCurThread), tcb_cptr);
+    /* ensure we got a TCB cap */
+    cap_type = cap_get_capType(lu_ret.cap);
+    if (cap_type != cap_thread_cap) {
+        userError("SysBenchmarkResetThreadUtilisation: cap is not a TCB, halting");
+        return EXCEPTION_NONE;
+    }
+
+    tcb_t *tcb = TCB_PTR(cap_thread_cap_get_capTCBPtr(lu_ret.cap));
+
+    benchmark_track_reset_utilisation(tcb);
+    return EXCEPTION_NONE;
+}
+
+#ifdef CONFIG_DEBUG_BUILD
+
+exception_t handle_SysBenchmarkDumpAllThreadsUtilisation(void)
+{
+    printf("{\n");
+    printf("  \"BENCHMARK_TOTAL_UTILISATION\":%lu,\n",
+           (word_t)(NODE_STATE(benchmark_end_time) - NODE_STATE(benchmark_start_time)));
+    printf("  \"BENCHMARK_TOTAL_KERNEL_UTILISATION\":%lu,\n", (word_t) NODE_STATE(benchmark_kernel_time));
+    printf("  \"BENCHMARK_TOTAL_NUMBER_KERNEL_ENTRIES\":%lu,\n", (word_t) NODE_STATE(benchmark_kernel_number_entries));
+    printf("  \"BENCHMARK_TOTAL_NUMBER_SCHEDULES\":%lu,\n", (word_t) NODE_STATE(benchmark_kernel_number_schedules));
+    printf("  \"BENCHMARK_TCB_\": [\n");
+    for (tcb_t *curr = NODE_STATE(ksDebugTCBs); curr != NULL; curr = TCB_PTR_DEBUG_PTR(curr)->tcbDebugNext) {
+        printf("    {\n");
+        printf("      \"NAME\":\"%s\",\n", TCB_PTR_DEBUG_PTR(curr)->tcbName);
+        printf("      \"UTILISATION\":%lu,\n", (word_t) curr->benchmark.utilisation);
+        printf("      \"NUMBER_SCHEDULES\":%lu,\n", (word_t) curr->benchmark.number_schedules);
+        printf("      \"KERNEL_UTILISATION\":%lu,\n", (word_t) curr->benchmark.kernel_utilisation);
+        printf("      \"NUMBER_KERNEL_ENTRIES\":%lu\n", (word_t) curr->benchmark.number_kernel_entries);
+        printf("    }");
+        if (TCB_PTR_DEBUG_PTR(curr)->tcbDebugNext != NULL) {
+            printf(",\n");
+        } else {
+            printf("\n");
+        }
+    }
+    printf("  ]\n}\n");
+    return EXCEPTION_NONE;
+}
+
+exception_t handle_SysBenchmarkResetAllThreadsUtilisation(void)
+{
+    for (tcb_t *curr = NODE_STATE(ksDebugTCBs); curr != NULL; curr = TCB_PTR_DEBUG_PTR(curr)->tcbDebugNext) {
+        benchmark_track_reset_utilisation(curr);
+    }
+    return EXCEPTION_NONE;
+}
+
+#endif /* CONFIG_DEBUG_BUILD */
+#endif /* CONFIG_BENCHMARK_TRACK_UTILISATION */
+#endif /* CONFIG_ENABLE_BENCHMARKS */
+#line 1 "/Users/payas/git/seL4/src/benchmark/benchmark_track.c"
+/*
+ * Copyright 2016, General Dynamics C4 Systems
  *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -13582,15 +13799,11 @@ void benchmark_track_exit(void)
     }
 }
 #endif /* CONFIG_BENCHMARK_TRACK_KERNEL_ENTRIES */
-
+#line 1 "/Users/payas/git/seL4/src/benchmark/benchmark_utilisation.c"
 /*
  * Copyright 2016, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -13598,10 +13811,7 @@ void benchmark_track_exit(void)
 
 #ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
 
-bool_t benchmark_log_utilisation_enabled;
 timestamp_t ksEnter;
-timestamp_t benchmark_start_time;
-timestamp_t benchmark_end_time;
 
 void benchmark_track_utilisation_dump(void)
 {
@@ -13620,53 +13830,59 @@ void benchmark_track_utilisation_dump(void)
     }
 
     tcb = TCB_PTR(cap_thread_cap_get_capTCBPtr(lu_ret.cap));
+
+    /* Selected TCB counters */
     buffer[BENCHMARK_TCB_UTILISATION] = tcb->benchmark.utilisation; /* Requested thread utilisation */
-    buffer[BENCHMARK_IDLE_LOCALCPU_UTILISATION] = NODE_STATE(ksIdleThread)->benchmark.utilisation; /* Idle thread utilisation of current CPU */
+    buffer[BENCHMARK_TCB_NUMBER_SCHEDULES] = tcb->benchmark.number_schedules; /* Number of times scheduled */
+    buffer[BENCHMARK_TCB_KERNEL_UTILISATION] = tcb->benchmark.kernel_utilisation; /* Utilisation spent in kernel */
+    buffer[BENCHMARK_TCB_NUMBER_KERNEL_ENTRIES] = tcb->benchmark.number_kernel_entries; /* Number of kernel entries */
+
+    /* Idle counters */
+    buffer[BENCHMARK_IDLE_LOCALCPU_UTILISATION] = NODE_STATE(
+                                                      ksIdleThread)->benchmark.utilisation; /* Idle thread utilisation of current CPU */
 #ifdef ENABLE_SMP_SUPPORT
-    buffer[BENCHMARK_IDLE_TCBCPU_UTILISATION] = NODE_STATE_ON_CORE(ksIdleThread, tcb->tcbAffinity)->benchmark.utilisation; /* Idle thread utilisation of CPU the TCB is running on */
+    buffer[BENCHMARK_IDLE_TCBCPU_UTILISATION] = NODE_STATE_ON_CORE(ksIdleThread,
+                                                                   tcb->tcbAffinity)->benchmark.utilisation; /* Idle thread utilisation of CPU the TCB is running on */
 #else
     buffer[BENCHMARK_IDLE_TCBCPU_UTILISATION] = buffer[BENCHMARK_IDLE_LOCALCPU_UTILISATION];
 #endif
 
+    buffer[BENCHMARK_IDLE_NUMBER_SCHEDULES] = NODE_STATE(
+                                                  ksIdleThread)->benchmark.number_schedules; /* Number of times scheduled */
+    buffer[BENCHMARK_IDLE_KERNEL_UTILISATION] = NODE_STATE(
+                                                    ksIdleThread)->benchmark.kernel_utilisation; /* Utilisation spent in kernel */
+    buffer[BENCHMARK_IDLE_NUMBER_KERNEL_ENTRIES] = NODE_STATE(
+                                                       ksIdleThread)->benchmark.number_kernel_entries; /* Number of kernel entries */
+
+
+    /* Total counters */
 #ifdef CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT
     buffer[BENCHMARK_TOTAL_UTILISATION] =
-        (ccnt_num_overflows * 0xFFFFFFFFU) + benchmark_end_time - benchmark_start_time;
+        (NODE_STATE(ccnt_num_overflows) * 0xFFFFFFFFU) + NODE_STATE(benchmark_end_time) - NODE_STATE(benchmark_start_time);
 #else
-    buffer[BENCHMARK_TOTAL_UTILISATION] = benchmark_end_time - benchmark_start_time; /* Overall time */
+    buffer[BENCHMARK_TOTAL_UTILISATION] = NODE_STATE(benchmark_end_time) - NODE_STATE(
+                                              benchmark_start_time); /* Overall time */
 #endif /* CONFIG_ARM_ENABLE_PMU_OVERFLOW_INTERRUPT */
+    buffer[BENCHMARK_TOTAL_NUMBER_SCHEDULES] = NODE_STATE(benchmark_kernel_number_schedules);
+    buffer[BENCHMARK_TOTAL_KERNEL_UTILISATION] = NODE_STATE(benchmark_kernel_time);
+    buffer[BENCHMARK_TOTAL_NUMBER_KERNEL_ENTRIES] = NODE_STATE(benchmark_kernel_number_entries);
 
 }
 
-void benchmark_track_reset_utilisation(void)
+void benchmark_track_reset_utilisation(tcb_t *tcb)
 {
-    tcb_t *tcb = NULL;
-    word_t tcb_cptr = getRegister(NODE_STATE(ksCurThread), capRegister);
-    lookupCap_ret_t lu_ret;
-    word_t cap_type;
-
-    lu_ret = lookupCap(NODE_STATE(ksCurThread), tcb_cptr);
-    /* ensure we got a TCB cap */
-    cap_type = cap_get_capType(lu_ret.cap);
-    if (cap_type != cap_thread_cap) {
-        userError("SysBenchmarkResetThreadUtilisation: cap is not a TCB, halting");
-        return;
-    }
-
-    tcb = TCB_PTR(cap_thread_cap_get_capTCBPtr(lu_ret.cap));
-
     tcb->benchmark.utilisation = 0;
+    tcb->benchmark.number_schedules = 0;
+    tcb->benchmark.number_kernel_entries = 0;
+    tcb->benchmark.kernel_utilisation = 0;
     tcb->benchmark.schedule_start_time = 0;
 }
 #endif /* CONFIG_BENCHMARK_TRACK_UTILISATION */
-
+#line 1 "/Users/payas/git/seL4/src/fastpath/fastpath.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -13677,11 +13893,11 @@ void benchmark_track_reset_utilisation(void)
 #endif
 #include <benchmark/benchmark_utilisation.h>
 
-void
-#ifdef ARCH_X86
-NORETURN
+#ifdef CONFIG_ARCH_ARM
+static inline
+FORCE_INLINE
 #endif
-fastpath_call(word_t cptr, word_t msgInfo)
+void NORETURN fastpath_call(word_t cptr, word_t msgInfo)
 {
     seL4_MessageInfo_t info;
     cap_t ep_cap;
@@ -13689,7 +13905,6 @@ fastpath_call(word_t cptr, word_t msgInfo)
     word_t length;
     tcb_t *dest;
     word_t badge;
-    cte_t *replySlot, *callerSlot;
     cap_t newVTable;
     vspace_root_t *cap_pd;
     pde_t stored_hw_asid;
@@ -13731,7 +13946,7 @@ fastpath_call(word_t cptr, word_t msgInfo)
 
     /* ensure we are not single stepping the destination in ia32 */
 #if defined(CONFIG_HARDWARE_DEBUG_API) && defined(CONFIG_ARCH_IA32)
-    if (dest->tcbArch.tcbContext.breakpointState.single_step_enabled) {
+    if (unlikely(dest->tcbArch.tcbContext.breakpointState.single_step_enabled)) {
         slowpath(SysCall);
     }
 #endif
@@ -13757,8 +13972,28 @@ fastpath_call(word_t cptr, word_t msgInfo)
     stored_hw_asid.words[0] = cap_pml4_cap_get_capPML4MappedASID_fp(newVTable);
 #endif
 
+#ifdef CONFIG_ARCH_IA32
+    /* stored_hw_asid is unused on ia32 fastpath, but gets passed into a function below. */
+    stored_hw_asid.words[0] = 0;
+#endif
 #ifdef CONFIG_ARCH_AARCH64
-    stored_hw_asid.words[0] = cap_page_global_directory_cap_get_capPGDMappedASID(newVTable);
+    /* Need to test that the ASID is still valid */
+    asid_t asid = cap_vtable_root_get_mappedASID(newVTable);
+    asid_map_t asid_map = findMapForASID(asid);
+    if (unlikely(asid_map_get_type(asid_map) != asid_map_asid_map_vspace ||
+                 VSPACE_PTR(asid_map_asid_map_vspace_get_vspace_root(asid_map)) != cap_pd)) {
+        slowpath(SysCall);
+    }
+#ifdef CONFIG_ARM_HYPERVISOR_SUPPORT
+    /* Ensure the vmid is valid. */
+    if (unlikely(!asid_map_asid_map_vspace_get_stored_vmid_valid(asid_map))) {
+        slowpath(SysCall);
+    }
+    /* vmids are the tags used instead of hw_asids in hyp mode */
+    stored_hw_asid.words[0] = asid_map_asid_map_vspace_get_stored_hw_vmid(asid_map);
+#else
+    stored_hw_asid.words[0] = asid;
+#endif
 #endif
 
 #ifdef CONFIG_ARCH_RISCV
@@ -13769,14 +14004,15 @@ fastpath_call(word_t cptr, word_t msgInfo)
     /* let gcc optimise this out for 1 domain */
     dom = maxDom ? ksCurDomain : 0;
     /* ensure only the idle thread or lower prio threads are present in the scheduler */
-    if (likely(dest->tcbPriority < NODE_STATE(ksCurThread->tcbPriority)) &&
-            !isHighestPrio(dom, dest->tcbPriority)) {
+    if (unlikely(dest->tcbPriority < NODE_STATE(ksCurThread->tcbPriority) &&
+                 !isHighestPrio(dom, dest->tcbPriority))) {
         slowpath(SysCall);
     }
 
-    /* Ensure that the endpoint has has grant rights so that we can
+    /* Ensure that the endpoint has has grant or grant-reply rights so that we can
      * create the reply cap */
-    if (unlikely(!cap_endpoint_cap_get_capCanGrant(ep_cap))) {
+    if (unlikely(!cap_endpoint_cap_get_capCanGrant(ep_cap) &&
+                 !cap_endpoint_cap_get_capCanGrantReply(ep_cap))) {
         slowpath(SysCall);
     }
 
@@ -13787,9 +14023,20 @@ fastpath_call(word_t cptr, word_t msgInfo)
 #endif
 
     /* Ensure the original caller is in the current domain and can be scheduled directly. */
-    if (unlikely(dest->tcbDomain != ksCurDomain && maxDom)) {
+    if (unlikely(dest->tcbDomain != ksCurDomain && 0 < maxDom)) {
         slowpath(SysCall);
     }
+
+#ifdef CONFIG_KERNEL_MCS
+    if (unlikely(dest->tcbSchedContext != NULL)) {
+        slowpath(SysCall);
+    }
+
+    reply_t *reply = thread_state_get_replyObject_np(dest->tcbState);
+    if (unlikely(reply == NULL)) {
+        slowpath(SysCall);
+    }
+#endif
 
 #ifdef ENABLE_SMP_SUPPORT
     /* Ensure both threads have the same affinity */
@@ -13818,23 +14065,43 @@ fastpath_call(word_t cptr, word_t msgInfo)
 
     badge = cap_endpoint_cap_get_capEPBadge(ep_cap);
 
-    /* Block sender */
+    /* Unlink dest <-> reply, link src (cur thread) <-> reply */
     thread_state_ptr_set_tsType_np(&NODE_STATE(ksCurThread)->tcbState,
                                    ThreadState_BlockedOnReply);
+#ifdef CONFIG_KERNEL_MCS
+    thread_state_ptr_set_replyObject_np(&dest->tcbState, 0);
+    thread_state_ptr_set_replyObject_np(&NODE_STATE(ksCurThread)->tcbState, REPLY_REF(reply));
+    reply->replyTCB = NODE_STATE(ksCurThread);
 
+    sched_context_t *sc = NODE_STATE(ksCurThread)->tcbSchedContext;
+    sc->scTcb = dest;
+    dest->tcbSchedContext = sc;
+    NODE_STATE(ksCurThread)->tcbSchedContext = NULL;
+
+    reply_t *old_caller = sc->scReply;
+    reply->replyPrev = call_stack_new(REPLY_REF(sc->scReply), false);
+    if (unlikely(old_caller)) {
+        old_caller->replyNext = call_stack_new(REPLY_REF(reply), false);
+    }
+    reply->replyNext = call_stack_new(SC_REF(sc), true);
+    sc->scReply = reply;
+#else
     /* Get sender reply slot */
-    replySlot = TCB_PTR_CTE_PTR(NODE_STATE(ksCurThread), tcbReply);
+    cte_t *replySlot = TCB_PTR_CTE_PTR(NODE_STATE(ksCurThread), tcbReply);
 
     /* Get dest caller slot */
-    callerSlot = TCB_PTR_CTE_PTR(dest, tcbCaller);
+    cte_t *callerSlot = TCB_PTR_CTE_PTR(dest, tcbCaller);
 
     /* Insert reply cap */
-    cap_reply_cap_ptr_new_np(&callerSlot->cap, 0, TCB_REF(NODE_STATE(ksCurThread)));
+    word_t replyCanGrant = thread_state_ptr_get_blockingIPCCanGrant(&dest->tcbState);;
+    cap_reply_cap_ptr_new_np(&callerSlot->cap, replyCanGrant, 0,
+                             TCB_REF(NODE_STATE(ksCurThread)));
     mdb_node_ptr_set_mdbPrev_np(&callerSlot->cteMDBNode, CTE_REF(replySlot));
     mdb_node_ptr_mset_mdbNext_mdbRevocable_mdbFirstBadged(
         &replySlot->cteMDBNode, CTE_REF(callerSlot), 1, 1);
+#endif
 
-    fastpath_copy_mrs (length, NODE_STATE(ksCurThread), dest);
+    fastpath_copy_mrs(length, NODE_STATE(ksCurThread), dest);
 
     /* Dest thread is set Running, but not queued. */
     thread_state_ptr_set_tsType_np(&dest->tcbState,
@@ -13846,15 +14113,20 @@ fastpath_call(word_t cptr, word_t msgInfo)
     fastpath_restore(badge, msgInfo, NODE_STATE(ksCurThread));
 }
 
-void
-fastpath_reply_recv(word_t cptr, word_t msgInfo)
+#ifdef CONFIG_ARCH_ARM
+static inline
+FORCE_INLINE
+#endif
+#ifdef CONFIG_KERNEL_MCS
+void NORETURN fastpath_reply_recv(word_t cptr, word_t msgInfo, word_t reply)
+#else
+void NORETURN fastpath_reply_recv(word_t cptr, word_t msgInfo)
+#endif
 {
     seL4_MessageInfo_t info;
     cap_t ep_cap;
     endpoint_t *ep_ptr;
     word_t length;
-    cte_t *callerSlot;
-    cap_t callerCap;
     tcb_t *caller;
     word_t badge;
     tcb_t *endpointTail;
@@ -13887,9 +14159,19 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
         slowpath(SysReplyRecv);
     }
 
+#ifdef CONFIG_KERNEL_MCS
+    /* lookup the reply object */
+    cap_t reply_cap = lookup_fp(TCB_PTR_CTE_PTR(NODE_STATE(ksCurThread), tcbCTable)->cap, reply);
+
+    /* check it's a reply object */
+    if (unlikely(!cap_capType_equals(reply_cap, cap_reply_cap))) {
+        slowpath(SysReplyRecv);
+    }
+#endif
+
     /* Check there is nothing waiting on the notification */
-    if (NODE_STATE(ksCurThread)->tcbBoundNotification &&
-            notification_ptr_get_state(NODE_STATE(ksCurThread)->tcbBoundNotification) == NtfnState_Active) {
+    if (unlikely(NODE_STATE(ksCurThread)->tcbBoundNotification &&
+                 notification_ptr_get_state(NODE_STATE(ksCurThread)->tcbBoundNotification) == NtfnState_Active)) {
         slowpath(SysReplyRecv);
     }
 
@@ -13901,19 +14183,34 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
         slowpath(SysReplyRecv);
     }
 
+#ifdef CONFIG_KERNEL_MCS
+    /* Get the reply address */
+    reply_t *reply_ptr = REPLY_PTR(cap_reply_cap_get_capReplyPtr(reply_cap));
+    /* check that its valid and at the head of the call chain
+       and that the current thread's SC is going to be donated. */
+    if (unlikely(reply_ptr->replyTCB == NULL ||
+                 call_stack_get_isHead(reply_ptr->replyNext) == 0 ||
+                 SC_PTR(call_stack_get_callStackPtr(reply_ptr->replyNext)) != NODE_STATE(ksCurThread)->tcbSchedContext)) {
+        slowpath(SysReplyRecv);
+    }
+
+    /* Determine who the caller is. */
+    caller = reply_ptr->replyTCB;
+#else
     /* Only reply if the reply cap is valid. */
-    callerSlot = TCB_PTR_CTE_PTR(NODE_STATE(ksCurThread), tcbCaller);
-    callerCap = callerSlot->cap;
+    cte_t *callerSlot = TCB_PTR_CTE_PTR(NODE_STATE(ksCurThread), tcbCaller);
+    cap_t callerCap = callerSlot->cap;
     if (unlikely(!fastpath_reply_cap_check(callerCap))) {
         slowpath(SysReplyRecv);
     }
 
     /* Determine who the caller is. */
     caller = TCB_PTR(cap_reply_cap_get_capTCBPtr(callerCap));
+#endif
 
     /* ensure we are not single stepping the caller in ia32 */
 #if defined(CONFIG_HARDWARE_DEBUG_API) && defined(CONFIG_ARCH_IA32)
-    if (caller->tcbArch.tcbContext.breakpointState.single_step_enabled) {
+    if (unlikely(caller->tcbArch.tcbContext.breakpointState.single_step_enabled)) {
         slowpath(SysReplyRecv);
     }
 #endif
@@ -13921,9 +14218,17 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
     /* Check that the caller has not faulted, in which case a fault
        reply is generated instead. */
     fault_type = seL4_Fault_get_seL4_FaultType(caller->tcbFault);
+
+    /* Change this as more types of faults are supported */
+#ifndef CONFIG_EXCEPTION_FASTPATH
     if (unlikely(fault_type != seL4_Fault_NullFault)) {
         slowpath(SysReplyRecv);
     }
+#else
+    if (unlikely(fault_type != seL4_Fault_NullFault && fault_type != seL4_Fault_VMFault)) {
+        slowpath(SysReplyRecv);
+    }
+#endif
 
     /* Get destination thread.*/
     newVTable = TCB_PTR_CTE_PTR(caller, tcbVTable)->cap;
@@ -13932,7 +14237,7 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
     cap_pd = cap_vtable_cap_get_vspace_root_fp(newVTable);
 
     /* Ensure that the destination has a valid MMU. */
-    if (unlikely(! isValidVTableRoot_fp (newVTable))) {
+    if (unlikely(! isValidVTableRoot_fp(newVTable))) {
         slowpath(SysReplyRecv);
     }
 
@@ -13944,9 +14249,29 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
 #ifdef CONFIG_ARCH_X86_64
     stored_hw_asid.words[0] = cap_pml4_cap_get_capPML4MappedASID(newVTable);
 #endif
-
+#ifdef CONFIG_ARCH_IA32
+    /* stored_hw_asid is unused on ia32 fastpath, but gets passed into a function below. */
+    stored_hw_asid.words[0] = 0;
+#endif
 #ifdef CONFIG_ARCH_AARCH64
-    stored_hw_asid.words[0] = cap_page_global_directory_cap_get_capPGDMappedASID(newVTable);
+    /* Need to test that the ASID is still valid */
+    asid_t asid = cap_vtable_root_get_mappedASID(newVTable);
+    asid_map_t asid_map = findMapForASID(asid);
+    if (unlikely(asid_map_get_type(asid_map) != asid_map_asid_map_vspace ||
+                 VSPACE_PTR(asid_map_asid_map_vspace_get_vspace_root(asid_map)) != cap_pd)) {
+        slowpath(SysReplyRecv);
+    }
+#ifdef CONFIG_ARM_HYPERVISOR_SUPPORT
+    /* Ensure the vmid is valid. */
+    if (unlikely(!asid_map_asid_map_vspace_get_stored_vmid_valid(asid_map))) {
+        slowpath(SysReplyRecv);
+    }
+
+    /* vmids are the tags used instead of hw_asids in hyp mode */
+    stored_hw_asid.words[0] = asid_map_asid_map_vspace_get_stored_hw_vmid(asid_map);
+#else
+    stored_hw_asid.words[0] = asid;
+#endif
 #endif
 
 #ifdef CONFIG_ARCH_RISCV
@@ -13967,9 +14292,15 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
 #endif
 
     /* Ensure the original caller is in the current domain and can be scheduled directly. */
-    if (unlikely(caller->tcbDomain != ksCurDomain && maxDom)) {
+    if (unlikely(caller->tcbDomain != ksCurDomain && 0 < maxDom)) {
         slowpath(SysReplyRecv);
     }
+
+#ifdef CONFIG_KERNEL_MCS
+    if (unlikely(caller->tcbSchedContext != NULL)) {
+        slowpath(SysReplyRecv);
+    }
+#endif
 
 #ifdef ENABLE_SMP_SUPPORT
     /* Ensure both threads have the same affinity */
@@ -13977,6 +14308,11 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
         slowpath(SysReplyRecv);
     }
 #endif /* ENABLE_SMP_SUPPORT */
+
+#ifdef CONFIG_KERNEL_MCS
+    /* not possible to set reply object and not be blocked */
+    assert(thread_state_get_replyObject(NODE_STATE(ksCurThread)->tcbState) == 0);
+#endif
 
     /*
      * --- POINT OF NO RETURN ---
@@ -13991,6 +14327,16 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
     /* Set thread state to BlockedOnReceive */
     thread_state_ptr_mset_blockingObject_tsType(
         &NODE_STATE(ksCurThread)->tcbState, (word_t)ep_ptr, ThreadState_BlockedOnReceive);
+#ifdef CONFIG_KERNEL_MCS
+    /* unlink reply object from caller */
+    thread_state_ptr_set_replyObject_np(&caller->tcbState, 0);
+    /* set the reply object */
+    thread_state_ptr_set_replyObject_np(&NODE_STATE(ksCurThread)->tcbState, REPLY_REF(reply_ptr));
+    reply_ptr->replyTCB = NODE_STATE(ksCurThread);
+#else
+    thread_state_ptr_set_blockingIPCCanGrant(&NODE_STATE(ksCurThread)->tcbState,
+                                             cap_endpoint_cap_get_capCanGrant(ep_cap));;
+#endif
 
     /* Place the thread in the endpoint queue */
     endpointTail = endpoint_ptr_get_epQueue_tail_fp(ep_ptr);
@@ -14003,6 +14349,12 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
         endpoint_ptr_mset_epQueue_tail_state(ep_ptr, TCB_REF(NODE_STATE(ksCurThread)),
                                              EPState_Recv);
     } else {
+#ifdef CONFIG_KERNEL_MCS
+        /* Update queue. */
+        tcb_queue_t queue = tcbEPAppend(NODE_STATE(ksCurThread), ep_ptr_get_queue(ep_ptr));
+        endpoint_ptr_set_epQueue_head_np(ep_ptr, TCB_REF(queue.head));
+        endpoint_ptr_mset_epQueue_tail_state(ep_ptr, TCB_REF(queue.end), EPState_Recv);
+#else
         /* Append current thread onto the queue. */
         endpointTail->tcbEPNext = NODE_STATE(ksCurThread);
         NODE_STATE(ksCurThread)->tcbEPPrev = endpointTail;
@@ -14011,40 +14363,431 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
         /* Update tail of queue. */
         endpoint_ptr_mset_epQueue_tail_state(ep_ptr, TCB_REF(NODE_STATE(ksCurThread)),
                                              EPState_Recv);
+#endif
     }
 
+#ifdef CONFIG_KERNEL_MCS
+    /* update call stack */
+    word_t prev_ptr = call_stack_get_callStackPtr(reply_ptr->replyPrev);
+    sched_context_t *sc = NODE_STATE(ksCurThread)->tcbSchedContext;
+    NODE_STATE(ksCurThread)->tcbSchedContext = NULL;
+    caller->tcbSchedContext = sc;
+    sc->scTcb = caller;
+
+    sc->scReply = REPLY_PTR(prev_ptr);
+    if (unlikely(REPLY_PTR(prev_ptr) != NULL)) {
+        sc->scReply->replyNext = reply_ptr->replyNext;
+    }
+
+    /* TODO neccessary? */
+    reply_ptr->replyPrev.words[0] = 0;
+    reply_ptr->replyNext.words[0] = 0;
+#else
     /* Delete the reply cap. */
     mdb_node_ptr_mset_mdbNext_mdbRevocable_mdbFirstBadged(
         &CTE_PTR(mdb_node_get_mdbPrev(callerSlot->cteMDBNode))->cteMDBNode,
         0, 1, 1);
     callerSlot->cap = cap_null_cap_new();
     callerSlot->cteMDBNode = nullMDBNode;
+#endif
 
-    /* I know there's no fault, so straight to the transfer. */
+#ifdef CONFIG_EXCEPTION_FASTPATH
+    if (unlikely(fault_type != seL4_Fault_NullFault)) {
+        /* Note - this works as is for VM faults but will need to be changed when other faults are added. VM faults always
+         * restart the faulting thread upon reply but this is not always the case with other types of faults. This can either
+         * be handled in the fastpath or redirected to the slowpath, but either way, this code must be changed so we do not
+         * forcefully switch to a thread which is meant to stay inactive. */
 
-    /* Replies don't have a badge. */
-    badge = 0;
 
-    fastpath_copy_mrs (length, NODE_STATE(ksCurThread), caller);
+        /* In the slowpath, the thread is set to ThreadState_Restart and its PC is set to its restartPC in activateThread().
+         * In the fastpath, this step is bypassed and we directly complete the activateThread() steps that set the PC and make
+         * the thread runnable. */
+        word_t pc = getRestartPC(caller);
+        setNextPC(caller, pc);
 
-    /* Dest thread is set Running, but not queued. */
-    thread_state_ptr_set_tsType_np(&caller->tcbState,
-                                   ThreadState_Running);
-    switchToThread_fp(caller, cap_pd, stored_hw_asid);
+        /* Clear the tcbFault variable to indicate that it has been handled. */
+        caller->tcbFault = seL4_Fault_NullFault_new();
 
+        /* Dest thread is set Running, but not queued. */
+        thread_state_ptr_set_tsType_np(&caller->tcbState, ThreadState_Running);
+        switchToThread_fp(caller, cap_pd, stored_hw_asid);
+
+        /* The badge/msginfo do not need to be not sent - this is not necessary for exceptions */
+        restore_user_context();
+    } else {
+#endif
+        /* There's no fault, so straight to the transfer. */
+
+        /* Replies don't have a badge. */
+        badge = 0;
+
+        fastpath_copy_mrs(length, NODE_STATE(ksCurThread), caller);
+
+        /* Dest thread is set Running, but not queued. */
+        thread_state_ptr_set_tsType_np(&caller->tcbState, ThreadState_Running);
+        switchToThread_fp(caller, cap_pd, stored_hw_asid);
+
+        msgInfo = wordFromMessageInfo(seL4_MessageInfo_set_capsUnwrapped(info, 0));
+
+        fastpath_restore(badge, msgInfo, NODE_STATE(ksCurThread));
+
+#ifdef CONFIG_EXCEPTION_FASTPATH
+    }
+#endif
+}
+
+#ifdef CONFIG_SIGNAL_FASTPATH
+#ifdef CONFIG_ARCH_ARM
+static inline
+FORCE_INLINE
+#endif
+void NORETURN fastpath_signal(word_t cptr, word_t msgInfo)
+{
+    word_t fault_type;
+    sched_context_t *sc = NULL;
+    bool_t schedulable = false;
+    bool_t crossnode = false;
+    bool_t idle = false;
+    tcb_t *dest = NULL;
+
+    /* Get fault type. */
+    fault_type = seL4_Fault_get_seL4_FaultType(NODE_STATE(ksCurThread)->tcbFault);
+
+    /* Check there's no saved fault. Can be removed if the current thread can't
+     * have a fault while invoking the fastpath */
+    if (unlikely(fault_type != seL4_Fault_NullFault)) {
+        slowpath(SysSend);
+    }
+
+    /* Lookup the cap */
+    cap_t cap = lookup_fp(TCB_PTR_CTE_PTR(NODE_STATE(ksCurThread), tcbCTable)->cap, cptr);
+
+    /* Check it's a notification */
+    if (unlikely(!cap_capType_equals(cap, cap_notification_cap))) {
+        slowpath(SysSend);
+    }
+
+    /* Check that we are allowed to send to this cap */
+    if (unlikely(!cap_notification_cap_get_capNtfnCanSend(cap))) {
+        slowpath(SysSend);
+    }
+
+    /* Check that the current domain hasn't expired */
+    if (unlikely(isCurDomainExpired())) {
+        slowpath(SysSend);
+    }
+
+    /* Get the notification address */
+    notification_t *ntfnPtr = NTFN_PTR(cap_notification_cap_get_capNtfnPtr(cap));
+
+    /* Get the notification state */
+    uint32_t ntfnState = notification_ptr_get_state(ntfnPtr);
+
+    /* Get the notification badge */
+    word_t badge = cap_notification_cap_get_capNtfnBadge(cap);
+    switch (ntfnState) {
+    case NtfnState_Active:
+#ifdef CONFIG_BENCHMARK_TRACK_KERNEL_ENTRIES
+        ksKernelEntry.is_fastpath = true;
+#endif
+        ntfn_set_active(ntfnPtr, badge | notification_ptr_get_ntfnMsgIdentifier(ntfnPtr));
+        restore_user_context();
+        UNREACHABLE();
+    case NtfnState_Idle:
+        dest = (tcb_t *) notification_ptr_get_ntfnBoundTCB(ntfnPtr);
+
+        if (!dest || thread_state_ptr_get_tsType(&dest->tcbState) != ThreadState_BlockedOnReceive) {
+#ifdef CONFIG_BENCHMARK_TRACK_KERNEL_ENTRIES
+            ksKernelEntry.is_fastpath = true;
+#endif
+            ntfn_set_active(ntfnPtr, badge);
+            restore_user_context();
+            UNREACHABLE();
+        }
+
+        idle = true;
+        break;
+    case NtfnState_Waiting:
+        dest = TCB_PTR(notification_ptr_get_ntfnQueue_head(ntfnPtr));
+        break;
+    default:
+        fail("Invalid notification state");
+    }
+
+    /* Get the bound SC of the signalled thread */
+    sc = dest->tcbSchedContext;
+
+    /* If the signalled thread doesn't have a bound SC, check if one can be
+     * donated from the notification. If not, go to the slowpath */
+    if (!sc) {
+        sc = SC_PTR(notification_ptr_get_ntfnSchedContext(ntfnPtr));
+        if (sc == NULL || sc->scTcb != NULL) {
+            slowpath(SysSend);
+        }
+
+        /* Slowpath the case where dest has its FPU context in the FPU of a core*/
+#if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_HAVE_FPU)
+        if (nativeThreadUsingFPU(dest)) {
+            slowpath(SysSend);
+        }
+#endif
+    }
+
+    /* Only fastpath signal to threads which will not become the new highest prio thread on the
+     * core of their SC, even if the currently running thread on the core is the idle thread. */
+    if (NODE_STATE_ON_CORE(ksCurThread, sc->scCore)->tcbPriority < dest->tcbPriority) {
+        slowpath(SysSend);
+    }
+
+    /* Simplified schedContext_resume that does not change state and reverts to the
+     * slowpath in cases where the SC does not have sufficient budget, as this case
+     * adds extra scheduler logic. Normally, this is done after donation of SC
+     * but after tweaking it, I don't see anything executed in schedContext_donate
+     * that will affect the conditions of this check */
+    if (sc->scRefillMax > 0) {
+        if (!(refill_ready(sc) && refill_sufficient(sc, 0))) {
+            slowpath(SysSend);
+        }
+        schedulable = true;
+    }
+
+    /* Check if signal is cross-core or cross-domain */
+    if (ksCurDomain != dest->tcbDomain SMP_COND_STATEMENT( || sc->scCore != getCurrentCPUIndex())) {
+        crossnode = true;
+    }
+
+    /*  Point of no return */
+#ifdef CONFIG_BENCHMARK_TRACK_KERNEL_ENTRIES
+    ksKernelEntry.is_fastpath = true;
+#endif
+
+    if (idle) {
+        /* Cancel the IPC that the signalled thread is waiting on */
+        cancelIPC_fp(dest);
+    } else {
+        /* Dequeue dest from the notification queue */
+        ntfn_queue_dequeue_fp(dest, ntfnPtr);
+    }
+
+    /* Wake up the signalled thread and tranfer badge */
+    setRegister(dest, badgeRegister, badge);
+    thread_state_ptr_set_tsType_np(&dest->tcbState, ThreadState_Running);
+
+    /* Donate SC if necessary. The checks for this were already done before
+     * the point of no return */
+    maybeDonateSchedContext_fp(dest, sc);
+
+    /* Left this in the same form as the slowpath. Not sure if optimal */
+    if (sc_sporadic(dest->tcbSchedContext)) {
+        assert(dest->tcbSchedContext != NODE_STATE(ksCurSC));
+        if (dest->tcbSchedContext != NODE_STATE(ksCurSC)) {
+            refill_unblock_check(dest->tcbSchedContext);
+        }
+    }
+
+    /* If dest was already not schedulable prior to the budget check
+     * the slowpath doesn't seem to do anything special besides just not
+     * not scheduling the dest thread. */
+    if (schedulable) {
+        if (NODE_STATE(ksCurThread)->tcbPriority > dest->tcbPriority || crossnode) {
+            SCHED_ENQUEUE(dest);
+        } else {
+            SCHED_APPEND(dest);
+        }
+    }
+
+    restore_user_context();
+}
+#endif
+
+#ifdef CONFIG_EXCEPTION_FASTPATH
+static inline
+FORCE_INLINE
+void NORETURN fastpath_vm_fault(vm_fault_type_t type)
+{
+    cap_t handler_cap;
+    endpoint_t *ep_ptr;
+    tcb_t *dest;
+    cap_t newVTable;
+    vspace_root_t *cap_pd;
+    word_t badge;
+    seL4_MessageInfo_t info;
+    word_t msgInfo;
+    pde_t stored_hw_asid;
+    dom_t dom;
+
+    /* Get the fault handler endpoint */
+#ifdef CONFIG_KERNEL_MCS
+    handler_cap = TCB_PTR_CTE_PTR(NODE_STATE(ksCurThread), tcbFaultHandler)->cap;
+#else
+    cptr_t handlerCPtr;
+    handlerCPtr = NODE_STATE(ksCurThread)->tcbFaultHandler;
+    handler_cap = lookup_fp(TCB_PTR_CTE_PTR(NODE_STATE(ksCurThread), tcbCTable)->cap, handlerCPtr);
+#endif
+
+    /* Check that the cap is an endpoint cap and on non-mcs, that you can send to it and create the reply cap */
+    if (unlikely(!cap_capType_equals(handler_cap, cap_endpoint_cap)
+#ifndef CONFIG_KERNEL_MCS
+                 || !cap_endpoint_cap_get_capCanSend(handler_cap) || (!cap_endpoint_cap_get_capCanGrant(handler_cap) &&
+                                                                      !cap_endpoint_cap_get_capCanGrantReply(handler_cap))
+#endif
+                )) {
+        vm_fault_slowpath(type);
+    }
+
+    /* Get the endpoint address */
+    ep_ptr = EP_PTR(cap_endpoint_cap_get_capEPPtr(handler_cap));
+
+    /* Get the destination thread, which is only going to be valid
+    * if the endpoint is valid. */
+    dest = TCB_PTR(endpoint_ptr_get_epQueue_head(ep_ptr));
+
+    /* Check that there's a thread waiting to receive */
+    if (unlikely(endpoint_ptr_get_state(ep_ptr) != EPState_Recv)) {
+        vm_fault_slowpath(type);
+    }
+
+    /* Get destination thread.*/
+    newVTable = TCB_PTR_CTE_PTR(dest, tcbVTable)->cap;
+
+    /* Get vspace root. */
+    cap_pd = cap_vtable_cap_get_vspace_root_fp(newVTable);
+
+    /* Ensure that the destination has a valid VTable. */
+    if (unlikely(! isValidVTableRoot_fp(newVTable))) {
+        vm_fault_slowpath(type);
+    }
+
+#ifdef CONFIG_ARCH_AARCH64
+    /* Need to test that the ASID is still valid */
+    asid_t asid = cap_vtable_root_get_mappedASID(newVTable);
+    asid_map_t asid_map = findMapForASID(asid);
+    if (unlikely(asid_map_get_type(asid_map) != asid_map_asid_map_vspace ||
+                 VSPACE_PTR(asid_map_asid_map_vspace_get_vspace_root(asid_map)) != cap_pd)) {
+        vm_fault_slowpath(type);
+    }
+#ifdef CONFIG_ARM_HYPERVISOR_SUPPORT
+    /* Ensure the vmid is valid. */
+    if (unlikely(!asid_map_asid_map_vspace_get_stored_vmid_valid(asid_map))) {
+        vm_fault_slowpath(type);
+    }
+
+    /* vmids are the tags used instead of hw_asids in hyp mode */
+    stored_hw_asid.words[0] = asid_map_asid_map_vspace_get_stored_hw_vmid(asid_map);
+#else
+    stored_hw_asid.words[0] = asid;
+#endif
+#endif
+
+    /* let gcc optimise this out for 1 domain */
+    dom = maxDom ? ksCurDomain : 0;
+    /* ensure only the idle thread or lower prio threads are present in the scheduler */
+    if (unlikely(dest->tcbPriority < NODE_STATE(ksCurThread->tcbPriority) &&
+                 !isHighestPrio(dom, dest->tcbPriority))) {
+
+        vm_fault_slowpath(type);
+    }
+
+    /* Ensure the original caller is in the current domain and can be scheduled directly. */
+    if (unlikely(dest->tcbDomain != ksCurDomain && 0 < maxDom)) {
+        vm_fault_slowpath(type);
+    }
+
+#ifdef CONFIG_KERNEL_MCS
+    if (unlikely(dest->tcbSchedContext != NULL)) {
+        vm_fault_slowpath(type);
+    }
+
+    reply_t *reply = thread_state_get_replyObject_np(dest->tcbState);
+    if (unlikely(reply == NULL)) {
+        vm_fault_slowpath(type);
+    }
+#endif
+
+#ifdef ENABLE_SMP_SUPPORT
+    /* Ensure both threads have the same affinity */
+    if (unlikely(NODE_STATE(ksCurThread)->tcbAffinity != dest->tcbAffinity)) {
+        vm_fault_slowpath(type);
+    }
+#endif /* ENABLE_SMP_SUPPORT */
+
+    /*
+     * --- POINT OF NO RETURN ---
+     *
+     * At this stage, we have committed to performing the IPC.
+     */
+
+    /* Sets the tcb fault based on the vm fault information. Has one slowpath transition
+    but only for a debug fault on AARCH32 */
+
+    fastpath_set_tcbfault_vm_fault(type);
+
+#ifdef CONFIG_BENCHMARK_TRACK_KERNEL_ENTRIES
+    ksKernelEntry.is_fastpath = true;
+#endif
+
+    /* Dequeue the destination. */
+    endpoint_ptr_set_epQueue_head_np(ep_ptr, TCB_REF(dest->tcbEPNext));
+    if (unlikely(dest->tcbEPNext)) {
+        dest->tcbEPNext->tcbEPPrev = NULL;
+    } else {
+        endpoint_ptr_mset_epQueue_tail_state(ep_ptr, 0, EPState_Idle);
+    }
+
+    badge = cap_endpoint_cap_get_capEPBadge(handler_cap);
+
+    /* Unlink dest <-> reply, link src (cur thread) <-> reply */
+    thread_state_ptr_set_tsType_np(&NODE_STATE(ksCurThread)->tcbState, ThreadState_BlockedOnReply);
+#ifdef CONFIG_KERNEL_MCS
+
+    thread_state_ptr_set_replyObject_np(&dest->tcbState, 0);
+    thread_state_ptr_set_replyObject_np(&NODE_STATE(ksCurThread)->tcbState, REPLY_REF(reply));
+    reply->replyTCB = NODE_STATE(ksCurThread);
+
+    sched_context_t *sc = NODE_STATE(ksCurThread)->tcbSchedContext;
+    sc->scTcb = dest;
+    dest->tcbSchedContext = sc;
+    NODE_STATE(ksCurThread)->tcbSchedContext = NULL;
+
+    reply_t *old_caller = sc->scReply;
+    reply->replyPrev = call_stack_new(REPLY_REF(sc->scReply), false);
+    if (unlikely(old_caller)) {
+        old_caller->replyNext = call_stack_new(REPLY_REF(reply), false);
+    }
+    reply->replyNext = call_stack_new(SC_REF(sc), true);
+    sc->scReply = reply;
+#else
+    /* Get sender reply slot */
+    cte_t *replySlot = TCB_PTR_CTE_PTR(NODE_STATE(ksCurThread), tcbReply);
+
+    /* Get dest caller slot */
+    cte_t *callerSlot = TCB_PTR_CTE_PTR(dest, tcbCaller);
+
+    /* Insert reply cap */
+    word_t replyCanGrant = thread_state_ptr_get_blockingIPCCanGrant(&dest->tcbState);;
+    cap_reply_cap_ptr_new_np(&callerSlot->cap, replyCanGrant, 0, TCB_REF(NODE_STATE(ksCurThread)));
+    mdb_node_ptr_set_mdbPrev_np(&callerSlot->cteMDBNode, CTE_REF(replySlot));
+    mdb_node_ptr_mset_mdbNext_mdbRevocable_mdbFirstBadged(&replySlot->cteMDBNode, CTE_REF(callerSlot), 1, 1);
+#endif
+    /* Set the message registers for the vm fault*/
+    fastpath_vm_fault_set_mrs(dest);
+
+    /* Generate the msginfo */
+    info = seL4_MessageInfo_new(seL4_Fault_VMFault, 0, 0, seL4_VMFault_Length);
+
+    /* Set the fault handler to running */
+    thread_state_ptr_set_tsType_np(&dest->tcbState, ThreadState_Running);
+    switchToThread_fp(dest, cap_pd, stored_hw_asid);
     msgInfo = wordFromMessageInfo(seL4_MessageInfo_set_capsUnwrapped(info, 0));
 
     fastpath_restore(badge, msgInfo, NODE_STATE(ksCurThread));
 }
-
+#endif
+#line 1 "/Users/payas/git/seL4/src/inlines.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <types.h>
@@ -14053,15 +14796,15 @@ fastpath_reply_recv(word_t cptr, word_t msgInfo)
 lookup_fault_t current_lookup_fault;
 seL4_Fault_t current_fault;
 syscall_error_t current_syscall_error;
+#ifdef CONFIG_KERNEL_INVOCATION_REPORT_ERROR_IPC
+debug_syscall_error_t current_debug_error;
+#endif
 
+#line 1 "/Users/payas/git/seL4/src/kernel/boot.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <assert.h>
@@ -14070,115 +14813,235 @@ syscall_error_t current_syscall_error;
 #include <machine/io.h>
 #include <machine/registerset.h>
 #include <model/statedata.h>
-#include <arch/x86/arch/machine.h>
-#include <arch/x86/arch/kernel/boot.h>
-#include <arch/x86/arch/kernel/vspace.h>
+#include <arch/machine.h>
+#include <arch/kernel/boot.h>
+#include <arch/kernel/vspace.h>
 #include <linker.h>
-#include <plat/machine/hardware.h>
+#include <hardware.h>
 #include <util.h>
 
 /* (node-local) state accessed only during bootstrapping */
+BOOT_BSS ndks_boot_t ndks_boot;
 
-ndks_boot_t ndks_boot BOOT_DATA;
+BOOT_BSS rootserver_mem_t rootserver;
+BOOT_BSS static region_t rootserver_mem;
 
-BOOT_CODE bool_t
-insert_region(region_t reg)
+BOOT_CODE static void merge_regions(void)
+{
+    /* Walk through reserved regions and see if any can be merged */
+    for (word_t i = 1; i < ndks_boot.resv_count;) {
+        if (ndks_boot.reserved[i - 1].end == ndks_boot.reserved[i].start) {
+            /* extend earlier region */
+            ndks_boot.reserved[i - 1].end = ndks_boot.reserved[i].end;
+            /* move everything else down */
+            for (word_t j = i + 1; j < ndks_boot.resv_count; j++) {
+                ndks_boot.reserved[j - 1] = ndks_boot.reserved[j];
+            }
+
+            ndks_boot.resv_count--;
+            /* don't increment i in case there are multiple adjacent regions */
+        } else {
+            i++;
+        }
+    }
+}
+
+BOOT_CODE bool_t reserve_region(p_region_t reg)
 {
     word_t i;
+    assert(reg.start <= reg.end);
+    if (reg.start == reg.end) {
+        return true;
+    }
 
+    /* keep the regions in order */
+    for (i = 0; i < ndks_boot.resv_count; i++) {
+        /* Try and merge the region to an existing one, if possible */
+        if (ndks_boot.reserved[i].start == reg.end) {
+            ndks_boot.reserved[i].start = reg.start;
+            merge_regions();
+            return true;
+        }
+        if (ndks_boot.reserved[i].end == reg.start) {
+            ndks_boot.reserved[i].end = reg.end;
+            merge_regions();
+            return true;
+        }
+        /* Otherwise figure out where it should go. */
+        if (ndks_boot.reserved[i].start > reg.end) {
+            /* move regions down, making sure there's enough room */
+            if (ndks_boot.resv_count + 1 >= MAX_NUM_RESV_REG) {
+                printf("Can't mark region 0x%"SEL4_PRIx_word"-0x%"SEL4_PRIx_word
+                       " as reserved, try increasing MAX_NUM_RESV_REG (currently %d)\n",
+                       reg.start, reg.end, (int)MAX_NUM_RESV_REG);
+                return false;
+            }
+            for (word_t j = ndks_boot.resv_count; j > i; j--) {
+                ndks_boot.reserved[j] = ndks_boot.reserved[j - 1];
+            }
+            /* insert the new region */
+            ndks_boot.reserved[i] = reg;
+            ndks_boot.resv_count++;
+            return true;
+        }
+    }
+
+    if (i + 1 == MAX_NUM_RESV_REG) {
+        printf("Can't mark region 0x%"SEL4_PRIx_word"-0x%"SEL4_PRIx_word
+               " as reserved, try increasing MAX_NUM_RESV_REG (currently %d)\n",
+               reg.start, reg.end, (int)MAX_NUM_RESV_REG);
+        return false;
+    }
+
+    ndks_boot.reserved[i] = reg;
+    ndks_boot.resv_count++;
+
+    return true;
+}
+
+BOOT_CODE static bool_t insert_region(region_t reg)
+{
     assert(reg.start <= reg.end);
     if (is_reg_empty(reg)) {
         return true;
     }
-    for (i = 0; i < MAX_NUM_FREEMEM_REG; i++) {
+
+    for (word_t i = 0; i < ARRAY_SIZE(ndks_boot.freemem); i++) {
         if (is_reg_empty(ndks_boot.freemem[i])) {
+            reserve_region(pptr_to_paddr_reg(reg));
             ndks_boot.freemem[i] = reg;
             return true;
         }
     }
+
+    /* We don't know if a platform or architecture picked MAX_NUM_FREEMEM_REG
+     * arbitrarily or carefully calculated it to be big enough. Running out of
+     * slots here is not really fatal, eventually memory allocation may fail
+     * if there is not enough free memory. However, allocations should never
+     * blindly assume to work, some error handling must always be in place even
+     * if the environment has been crafted carefully to support them. Thus, we
+     * don't stop the boot process here, but return an error. The caller should
+     * decide how bad this is.
+     */
+    printf("no free memory slot left for [%"SEL4_PRIx_word"..%"SEL4_PRIx_word"],"
+           " consider increasing MAX_NUM_FREEMEM_REG (%u)\n",
+           reg.start, reg.end, (unsigned int)MAX_NUM_FREEMEM_REG);
+
+    /* For debug builds we consider this a fatal error. Rationale is, that the
+     * caller does not check the error code at the moment, but just ignores any
+     * failures silently. */
+    assert(0);
+
     return false;
 }
 
-BOOT_CODE static inline word_t
-reg_size(region_t reg)
+BOOT_CODE static pptr_t alloc_rootserver_obj(word_t size_bits, word_t n)
 {
-    return reg.end - reg.start;
+    pptr_t allocated = rootserver_mem.start;
+    /* allocated memory must be aligned */
+    assert(allocated % BIT(size_bits) == 0);
+    rootserver_mem.start += (n * BIT(size_bits));
+    /* we must not have run out of memory */
+    assert(rootserver_mem.start <= rootserver_mem.end);
+    memzero((void *) allocated, n * BIT(size_bits));
+    return allocated;
 }
 
-BOOT_CODE pptr_t
-alloc_region(word_t size_bits)
+BOOT_CODE static word_t rootserver_max_size_bits(word_t extra_bi_size_bits)
 {
-    word_t i;
-    word_t reg_index = 0; /* gcc cannot work out that this will not be used uninitialized */
-    region_t reg = REG_EMPTY;
-    region_t rem_small = REG_EMPTY;
-    region_t rem_large = REG_EMPTY;
-    region_t new_reg;
-    region_t new_rem_small;
-    region_t new_rem_large;
-
-    /* Search for a freemem region that will be the best fit for an allocation. We favour allocations
-     * that are aligned to either end of the region. If an allocation must split a region we favour
-     * an unbalanced split. In both cases we attempt to use the smallest region possible. In general
-     * this means we aim to make the size of the smallest remaining region smaller (ideally zero)
-     * followed by making the size of the largest remaining region smaller */
-
-    for (i = 0; i < MAX_NUM_FREEMEM_REG; i++) {
-        /* Determine whether placing the region at the start or the end will create a bigger left over region */
-        if (ROUND_UP(ndks_boot.freemem[i].start, size_bits) - ndks_boot.freemem[i].start <
-                ndks_boot.freemem[i].end - ROUND_DOWN(ndks_boot.freemem[i].end, size_bits)) {
-            new_reg.start = ROUND_UP(ndks_boot.freemem[i].start, size_bits);
-            new_reg.end = new_reg.start + BIT(size_bits);
-        } else {
-            new_reg.end = ROUND_DOWN(ndks_boot.freemem[i].end, size_bits);
-            new_reg.start = new_reg.end - BIT(size_bits);
-        }
-        if (new_reg.end > new_reg.start &&
-                new_reg.start >= ndks_boot.freemem[i].start &&
-                new_reg.end <= ndks_boot.freemem[i].end) {
-            if (new_reg.start - ndks_boot.freemem[i].start < ndks_boot.freemem[i].end - new_reg.end) {
-                new_rem_small.start = ndks_boot.freemem[i].start;
-                new_rem_small.end = new_reg.start;
-                new_rem_large.start = new_reg.end;
-                new_rem_large.end = ndks_boot.freemem[i].end;
-            } else {
-                new_rem_large.start = ndks_boot.freemem[i].start;
-                new_rem_large.end = new_reg.start;
-                new_rem_small.start = new_reg.end;
-                new_rem_small.end = ndks_boot.freemem[i].end;
-            }
-            if ( is_reg_empty(reg) ||
-                    (reg_size(new_rem_small) < reg_size(rem_small)) ||
-                    (reg_size(new_rem_small) == reg_size(rem_small) && reg_size(new_rem_large) < reg_size(rem_large)) ) {
-                reg = new_reg;
-                rem_small = new_rem_small;
-                rem_large = new_rem_large;
-                reg_index = i;
-            }
-        }
-    }
-    if (is_reg_empty(reg)) {
-        printf("Kernel init failing: not enough memory\n");
-        return 0;
-    }
-    /* Remove the region in question */
-    ndks_boot.freemem[reg_index] = REG_EMPTY;
-    /* Add the remaining regions in largest to smallest order */
-    insert_region(rem_large);
-    if (!insert_region(rem_small)) {
-        printf("alloc_region(): wasted 0x%lx bytes due to alignment, try to increase MAX_NUM_FREEMEM_REG\n",
-               (word_t)(rem_small.end - rem_small.start));
-    }
-    return reg.start;
+    word_t cnode_size_bits = CONFIG_ROOT_CNODE_SIZE_BITS + seL4_SlotBits;
+    word_t max = MAX(cnode_size_bits, seL4_VSpaceBits);
+    return MAX(max, extra_bi_size_bits);
 }
 
-BOOT_CODE void
-write_slot(slot_ptr_t slot_ptr, cap_t cap)
+BOOT_CODE static word_t calculate_rootserver_size(v_region_t it_v_reg, word_t extra_bi_size_bits)
+{
+    /* work out how much memory we need for root server objects */
+    word_t size = BIT(CONFIG_ROOT_CNODE_SIZE_BITS + seL4_SlotBits);
+    size += BIT(seL4_TCBBits); // root thread tcb
+    size += BIT(seL4_PageBits); // ipc buf
+    size += BIT(BI_FRAME_SIZE_BITS); // boot info
+    size += BIT(seL4_ASIDPoolBits);
+    size += extra_bi_size_bits > 0 ? BIT(extra_bi_size_bits) : 0;
+    size += BIT(seL4_VSpaceBits); // root vspace
+#ifdef CONFIG_KERNEL_MCS
+    size += BIT(seL4_MinSchedContextBits); // root sched context
+#endif
+    /* for all archs, seL4_PageTable Bits is the size of all non top-level paging structures */
+    return size + arch_get_n_paging(it_v_reg) * BIT(seL4_PageTableBits);
+}
+
+BOOT_CODE static void maybe_alloc_extra_bi(word_t cmp_size_bits, word_t extra_bi_size_bits)
+{
+    if (extra_bi_size_bits >= cmp_size_bits && rootserver.extra_bi == 0) {
+        rootserver.extra_bi = alloc_rootserver_obj(extra_bi_size_bits, 1);
+    }
+}
+
+/* Create pptrs for all root server objects, starting at a give start address,
+ * to cover the virtual memory region v_reg, and any extra boot info.
+ */
+BOOT_CODE static void create_rootserver_objects(pptr_t start, v_region_t it_v_reg,
+                                                word_t extra_bi_size_bits)
+{
+    /* the largest object the PD, the root cnode, or the extra boot info */
+    word_t cnode_size_bits = CONFIG_ROOT_CNODE_SIZE_BITS + seL4_SlotBits;
+    word_t max = rootserver_max_size_bits(extra_bi_size_bits);
+
+    word_t size = calculate_rootserver_size(it_v_reg, extra_bi_size_bits);
+    rootserver_mem.start = start;
+    rootserver_mem.end = start + size;
+
+    maybe_alloc_extra_bi(max, extra_bi_size_bits);
+
+    /* the root cnode is at least 4k, so it could be larger or smaller than a pd. */
+#if (CONFIG_ROOT_CNODE_SIZE_BITS + seL4_SlotBits) > seL4_VSpaceBits
+    rootserver.cnode = alloc_rootserver_obj(cnode_size_bits, 1);
+    maybe_alloc_extra_bi(seL4_VSpaceBits, extra_bi_size_bits);
+    rootserver.vspace = alloc_rootserver_obj(seL4_VSpaceBits, 1);
+#else
+    rootserver.vspace = alloc_rootserver_obj(seL4_VSpaceBits, 1);
+    maybe_alloc_extra_bi(cnode_size_bits, extra_bi_size_bits);
+    rootserver.cnode = alloc_rootserver_obj(cnode_size_bits, 1);
+#endif
+
+    /* at this point we are up to creating 4k objects - which is the min size of
+     * extra_bi so this is the last chance to allocate it */
+    maybe_alloc_extra_bi(seL4_PageBits, extra_bi_size_bits);
+    compile_assert(invalid_seL4_ASIDPoolBits, seL4_ASIDPoolBits == seL4_PageBits);
+    rootserver.asid_pool = alloc_rootserver_obj(seL4_ASIDPoolBits, 1);
+    rootserver.ipc_buf = alloc_rootserver_obj(seL4_PageBits, 1);
+    compile_assert(invalid_BI_FRAME_SIZE_BITS, BI_FRAME_SIZE_BITS == seL4_PageBits);
+    rootserver.boot_info = alloc_rootserver_obj(BI_FRAME_SIZE_BITS, 1);
+
+    /* TCBs on aarch32 can be larger than page tables in certain configs */
+#if seL4_TCBBits >= seL4_PageTableBits
+    rootserver.tcb = alloc_rootserver_obj(seL4_TCBBits, 1);
+#endif
+
+    /* paging structures are 4k on every arch except aarch32 (1k) */
+    word_t n = arch_get_n_paging(it_v_reg);
+    rootserver.paging.start = alloc_rootserver_obj(seL4_PageTableBits, n);
+    rootserver.paging.end = rootserver.paging.start + n * BIT(seL4_PageTableBits);
+
+    /* for most archs, TCBs are smaller than page tables */
+#if seL4_TCBBits < seL4_PageTableBits
+    rootserver.tcb = alloc_rootserver_obj(seL4_TCBBits, 1);
+#endif
+
+#ifdef CONFIG_KERNEL_MCS
+    rootserver.sc = alloc_rootserver_obj(seL4_MinSchedContextBits, 1);
+#endif
+    /* we should have allocated all our memory */
+    assert(rootserver_mem.start == rootserver_mem.end);
+}
+
+BOOT_CODE void write_slot(slot_ptr_t slot_ptr, cap_t cap)
 {
     slot_ptr->cap = cap;
 
     slot_ptr->cteMDBNode = nullMDBNode;
-    mdb_node_ptr_set_mdbRevocable  (&slot_ptr->cteMDBNode, true);
+    mdb_node_ptr_set_mdbRevocable(&slot_ptr->cteMDBNode, true);
     mdb_node_ptr_set_mdbFirstBadged(&slot_ptr->cteMDBNode, true);
 }
 
@@ -14187,53 +15050,22 @@ write_slot(slot_ptr_t slot_ptr, cap_t cap)
  */
 compile_assert(root_cnode_size_valid,
                CONFIG_ROOT_CNODE_SIZE_BITS < 32 - seL4_SlotBits &&
-               (1U << CONFIG_ROOT_CNODE_SIZE_BITS) >= seL4_NumInitialCaps)
+               BIT(CONFIG_ROOT_CNODE_SIZE_BITS) >= seL4_NumInitialCaps &&
+               BIT(CONFIG_ROOT_CNODE_SIZE_BITS) >= (seL4_PageBits - seL4_SlotBits))
 
 BOOT_CODE cap_t
 create_root_cnode(void)
 {
-    pptr_t  pptr;
-    cap_t   cap;
-
-    /* write the number of root CNode slots to global state */
-    ndks_boot.slot_pos_max = BIT(CONFIG_ROOT_CNODE_SIZE_BITS);
-
-    /* create an empty root CNode */
-    pptr = alloc_region(CONFIG_ROOT_CNODE_SIZE_BITS + seL4_SlotBits);
-    if (!pptr) {
-        printf("Kernel init failing: could not create root cnode\n");
-        return cap_null_cap_new();
-    }
-    memzero(CTE_PTR(pptr), 1U << (CONFIG_ROOT_CNODE_SIZE_BITS + seL4_SlotBits));
-    cap =
-        cap_cnode_cap_new(
-            CONFIG_ROOT_CNODE_SIZE_BITS,      /* radix      */
-            wordBits - CONFIG_ROOT_CNODE_SIZE_BITS, /* guard size */
-            0,                                /* guard      */
-            pptr                              /* pptr       */
-        );
+    cap_t cap = cap_cnode_cap_new(
+                    CONFIG_ROOT_CNODE_SIZE_BITS, /* radix */
+                    wordBits - CONFIG_ROOT_CNODE_SIZE_BITS, /* guard size */
+                    0, /* guard */
+                    rootserver.cnode); /* pptr */
 
     /* write the root CNode cap into the root CNode */
-    write_slot(SLOT_PTR(pptr, seL4_CapInitThreadCNode), cap);
+    write_slot(SLOT_PTR(rootserver.cnode, seL4_CapInitThreadCNode), cap);
 
     return cap;
-}
-
-compile_assert(irq_cnode_size, BIT(IRQ_CNODE_BITS - seL4_SlotBits) > maxIRQ)
-
-BOOT_CODE bool_t
-create_irq_cnode(void)
-{
-    pptr_t pptr;
-    /* create an empty IRQ CNode */
-    pptr = alloc_region(IRQ_CNODE_BITS);
-    if (!pptr) {
-        printf("Kernel init failing: could not create irq cnode\n");
-        return false;
-    }
-    memzero((void*)pptr, 1 << IRQ_CNODE_BITS);
-    intStateIRQNode = (cte_t*)pptr;
-    return true;
 }
 
 /* Check domain scheduler assumptions. */
@@ -14245,121 +15077,82 @@ compile_assert(num_priorities_valid,
 BOOT_CODE void
 create_domain_cap(cap_t root_cnode_cap)
 {
-    cap_t cap;
-    word_t i;
-
     /* Check domain scheduler assumptions. */
     assert(ksDomScheduleLength > 0);
-    for (i = 0; i < ksDomScheduleLength; i++) {
+    for (word_t i = 0; i < ksDomScheduleLength; i++) {
         assert(ksDomSchedule[i].domain < CONFIG_NUM_DOMAINS);
         assert(ksDomSchedule[i].length > 0);
     }
 
-    cap = cap_domain_cap_new();
+    cap_t cap = cap_domain_cap_new();
     write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapDomain), cap);
 }
 
-
-BOOT_CODE cap_t
-create_ipcbuf_frame(cap_t root_cnode_cap, cap_t pd_cap, vptr_t vptr)
+BOOT_CODE cap_t create_ipcbuf_frame_cap(cap_t root_cnode_cap, cap_t pd_cap, vptr_t vptr)
 {
-    cap_t cap;
-    pptr_t pptr;
-
-    /* allocate the IPC buffer frame */
-    pptr = alloc_region(PAGE_BITS);
-    if (!pptr) {
-        printf("Kernel init failing: could not create ipc buffer frame\n");
-        return cap_null_cap_new();
-    }
-    clearMemory((void*)pptr, PAGE_BITS);
+    clearMemory((void *)rootserver.ipc_buf, PAGE_BITS);
 
     /* create a cap of it and write it into the root CNode */
-    cap = create_mapped_it_frame_cap(pd_cap, pptr, vptr, IT_ASID, false, false);
+    cap_t cap = create_mapped_it_frame_cap(pd_cap, rootserver.ipc_buf, vptr, IT_ASID, false, false);
     write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapInitThreadIPCBuffer), cap);
 
     return cap;
 }
 
-BOOT_CODE void
-create_bi_frame_cap(
-    cap_t      root_cnode_cap,
-    cap_t      pd_cap,
-    pptr_t     pptr,
-    vptr_t     vptr
-)
+BOOT_CODE void create_bi_frame_cap(cap_t root_cnode_cap, cap_t pd_cap, vptr_t vptr)
 {
-    cap_t cap;
-
     /* create a cap of it and write it into the root CNode */
-    cap = create_mapped_it_frame_cap(pd_cap, pptr, vptr, IT_ASID, false, false);
+    cap_t cap = create_mapped_it_frame_cap(pd_cap, rootserver.boot_info, vptr, IT_ASID, false, false);
     write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapBootInfoFrame), cap);
 }
 
-BOOT_CODE region_t
-allocate_extra_bi_region(word_t extra_size)
+BOOT_CODE word_t calculate_extra_bi_size_bits(word_t extra_size)
 {
-    /* determine power of 2 size of this region. avoid calling clzl on 0 though */
     if (extra_size == 0) {
-        /* return any valid address to correspond to the zero allocation */
-        return (region_t) {
-            0x1000, 0x1000
-        };
-    }
-    word_t size_bits = seL4_WordBits - 1 - clzl(ROUND_UP(extra_size, seL4_PageBits));
-    pptr_t pptr = alloc_region(size_bits);
-    if (!pptr) {
-        printf("Kernel init failed: could not allocate extra bootinfo region size bits %lu\n", size_bits);
-        return REG_EMPTY;
-    }
-
-    clearMemory((void*)pptr, size_bits);
-    ndks_boot.bi_frame->extraLen = BIT(size_bits);
-
-    return (region_t) {
-        pptr, pptr + BIT(size_bits)
-    };
-}
-
-BOOT_CODE pptr_t
-allocate_bi_frame(
-    node_id_t  node_id,
-    word_t   num_nodes,
-    vptr_t ipcbuf_vptr
-)
-{
-    pptr_t pptr;
-
-    /* create the bootinfo frame object */
-    pptr = alloc_region(BI_FRAME_SIZE_BITS);
-    if (!pptr) {
-        printf("Kernel init failed: could not allocate bootinfo frame\n");
         return 0;
     }
-    clearMemory((void*)pptr, BI_FRAME_SIZE_BITS);
 
-    /* initialise bootinfo-related global state */
-    ndks_boot.bi_frame = BI_PTR(pptr);
-    ndks_boot.slot_pos_cur = seL4_NumInitialCaps;
-
-    BI_PTR(pptr)->nodeID = node_id;
-    BI_PTR(pptr)->numNodes = num_nodes;
-    BI_PTR(pptr)->numIOPTLevels = 0;
-    BI_PTR(pptr)->ipcBuffer = (seL4_IPCBuffer *) ipcbuf_vptr;
-    BI_PTR(pptr)->initThreadCNodeSizeBits = CONFIG_ROOT_CNODE_SIZE_BITS;
-    BI_PTR(pptr)->initThreadDomain = ksDomSchedule[ksDomScheduleIdx].domain;
-    BI_PTR(pptr)->extraLen = 0;
-    BI_PTR(pptr)->extraBIPages.start = 0;
-    BI_PTR(pptr)->extraBIPages.end = 0;
-
-    return pptr;
+    word_t clzl_ret = clzl(ROUND_UP(extra_size, seL4_PageBits));
+    word_t msb = seL4_WordBits - 1 - clzl_ret;
+    /* If region is bigger than a page, make sure we overallocate rather than
+     * underallocate
+     */
+    if (extra_size > BIT(msb)) {
+        msb++;
+    }
+    return msb;
 }
 
-BOOT_CODE bool_t
-provide_cap(cap_t root_cnode_cap, cap_t cap)
+BOOT_CODE void populate_bi_frame(node_id_t node_id, word_t num_nodes,
+                                 vptr_t ipcbuf_vptr, word_t extra_bi_size)
 {
-    if (ndks_boot.slot_pos_cur >= ndks_boot.slot_pos_max) {
-        printf("Kernel init failed: ran out of cap slots\n");
+    /* clear boot info memory */
+    clearMemory((void *)rootserver.boot_info, BI_FRAME_SIZE_BITS);
+    if (extra_bi_size) {
+        clearMemory((void *)rootserver.extra_bi,
+                    calculate_extra_bi_size_bits(extra_bi_size));
+    }
+
+    /* initialise bootinfo-related global state */
+    seL4_BootInfo *bi = BI_PTR(rootserver.boot_info);
+    bi->nodeID = node_id;
+    bi->numNodes = num_nodes;
+    bi->numIOPTLevels = 0;
+    bi->ipcBuffer = (seL4_IPCBuffer *)ipcbuf_vptr;
+    bi->initThreadCNodeSizeBits = CONFIG_ROOT_CNODE_SIZE_BITS;
+    bi->initThreadDomain = ksDomSchedule[ksDomScheduleIdx].domain;
+    bi->extraLen = extra_bi_size;
+
+    ndks_boot.bi_frame = bi;
+    ndks_boot.slot_pos_cur = seL4_NumInitialCaps;
+}
+
+BOOT_CODE bool_t provide_cap(cap_t root_cnode_cap, cap_t cap)
+{
+    if (ndks_boot.slot_pos_cur >= BIT(CONFIG_ROOT_CNODE_SIZE_BITS)) {
+        printf("ERROR: can't add another cap, all %"SEL4_PRIu_word
+               " (=2^CONFIG_ROOT_CNODE_SIZE_BITS) slots used\n",
+               BIT(CONFIG_ROOT_CNODE_SIZE_BITS));
         return false;
     }
     write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), ndks_boot.slot_pos_cur), cap);
@@ -14367,8 +15160,7 @@ provide_cap(cap_t root_cnode_cap, cap_t cap)
     return true;
 }
 
-BOOT_CODE create_frames_of_region_ret_t
-create_frames_of_region(
+BOOT_CODE create_frames_of_region_ret_t create_frames_of_region(
     cap_t    root_cnode_cap,
     cap_t    pd_cap,
     region_t reg,
@@ -14385,37 +15177,32 @@ create_frames_of_region(
 
     for (f = reg.start; f < reg.end; f += BIT(PAGE_BITS)) {
         if (do_map) {
-            frame_cap = create_mapped_it_frame_cap(pd_cap, f, pptr_to_paddr((void*)(f - pv_offset)), IT_ASID, false, true);
+            frame_cap = create_mapped_it_frame_cap(pd_cap, f, pptr_to_paddr((void *)(f - pv_offset)), IT_ASID, false, true);
         } else {
             frame_cap = create_unmapped_it_frame_cap(f, false);
         }
-        if (!provide_cap(root_cnode_cap, frame_cap))
+        if (!provide_cap(root_cnode_cap, frame_cap)) {
             return (create_frames_of_region_ret_t) {
-            S_REG_EMPTY, false
-        };
+                .region  = S_REG_EMPTY,
+                .success = false
+            };
+        }
     }
 
     slot_pos_after = ndks_boot.slot_pos_cur;
 
     return (create_frames_of_region_ret_t) {
-        (seL4_SlotRegion) { slot_pos_before, slot_pos_after }, true
+        .region = (seL4_SlotRegion) {
+            .start = slot_pos_before,
+            .end   = slot_pos_after
+        },
+        .success = true
     };
 }
 
-BOOT_CODE cap_t
-create_it_asid_pool(cap_t root_cnode_cap)
+BOOT_CODE cap_t create_it_asid_pool(cap_t root_cnode_cap)
 {
-    pptr_t ap_pptr;
-    cap_t  ap_cap;
-
-    /* create ASID pool */
-    ap_pptr = alloc_region(seL4_ASIDPoolBits);
-    if (!ap_pptr) {
-        printf("Kernel init failed: failed to create initial thread asid pool\n");
-        return cap_null_cap_new();
-    }
-    memzero(ASID_POOL_PTR(ap_pptr), 1 << seL4_ASIDPoolBits);
-    ap_cap = cap_asid_pool_cap_new(IT_ASID >> asidLowBits, ap_pptr);
+    cap_t ap_cap = cap_asid_pool_cap_new(IT_ASID >> asidLowBits, rootserver.asid_pool);
     write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapInitThreadASIDPool), ap_cap);
 
     /* create ASID control cap */
@@ -14427,60 +15214,73 @@ create_it_asid_pool(cap_t root_cnode_cap)
     return ap_cap;
 }
 
-BOOT_CODE bool_t
-create_idle_thread(void)
+#ifdef CONFIG_KERNEL_MCS
+BOOT_CODE static void configure_sched_context(tcb_t *tcb, sched_context_t *sc_pptr, ticks_t timeslice)
+{
+    tcb->tcbSchedContext = sc_pptr;
+    refill_new(tcb->tcbSchedContext, MIN_REFILLS, timeslice, 0);
+    tcb->tcbSchedContext->scTcb = tcb;
+}
+
+BOOT_CODE bool_t init_sched_control(cap_t root_cnode_cap, word_t num_nodes)
+{
+    seL4_SlotPos slot_pos_before = ndks_boot.slot_pos_cur;
+
+    /* create a sched control cap for each core */
+    for (unsigned int i = 0; i < num_nodes; i++) {
+        if (!provide_cap(root_cnode_cap, cap_sched_control_cap_new(i))) {
+            printf("can't init sched_control for node %u, provide_cap() failed\n", i);
+            return false;
+        }
+    }
+
+    /* update boot info with slot region for sched control caps */
+    ndks_boot.bi_frame->schedcontrol = (seL4_SlotRegion) {
+        .start = slot_pos_before,
+        .end = ndks_boot.slot_pos_cur
+    };
+
+    return true;
+}
+#endif
+
+BOOT_CODE void create_idle_thread(void)
 {
     pptr_t pptr;
 
 #ifdef ENABLE_SMP_SUPPORT
-    for (int i = 0; i < CONFIG_MAX_NUM_NODES; i++) {
+    for (unsigned int i = 0; i < CONFIG_MAX_NUM_NODES; i++) {
 #endif /* ENABLE_SMP_SUPPORT */
-        pptr = alloc_region(seL4_TCBBits);
-        if (!pptr) {
-            printf("Kernel init failed: Unable to allocate tcb for idle thread\n");
-            return false;
-        }
-        memzero((void *)pptr, 1 << seL4_TCBBits);
+        pptr = (pptr_t) &ksIdleThreadTCB[SMP_TERNARY(i, 0)];
         NODE_STATE_ON_CORE(ksIdleThread, i) = TCB_PTR(pptr + TCB_OFFSET);
         configureIdleThread(NODE_STATE_ON_CORE(ksIdleThread, i));
 #ifdef CONFIG_DEBUG_BUILD
         setThreadName(NODE_STATE_ON_CORE(ksIdleThread, i), "idle_thread");
 #endif
         SMP_COND_STATEMENT(NODE_STATE_ON_CORE(ksIdleThread, i)->tcbAffinity = i);
+#ifdef CONFIG_KERNEL_MCS
+        configure_sched_context(NODE_STATE_ON_CORE(ksIdleThread, i), SC_PTR(&ksIdleThreadSC[SMP_TERNARY(i, 0)]),
+                                usToTicks(CONFIG_BOOT_THREAD_TIME_SLICE * US_IN_MS));
+        SMP_COND_STATEMENT(NODE_STATE_ON_CORE(ksIdleThread, i)->tcbSchedContext->scCore = i;)
+        NODE_STATE_ON_CORE(ksIdleSC, i) = SC_PTR(&ksIdleThreadSC[SMP_TERNARY(i, 0)]);
+#endif
 #ifdef ENABLE_SMP_SUPPORT
     }
 #endif /* ENABLE_SMP_SUPPORT */
-    return true;
 }
 
-BOOT_CODE tcb_t *
-create_initial_thread(
-    cap_t  root_cnode_cap,
-    cap_t  it_pd_cap,
-    vptr_t ui_v_entry,
-    vptr_t bi_frame_vptr,
-    vptr_t ipcbuf_vptr,
-    cap_t  ipcbuf_cap
-)
+BOOT_CODE tcb_t *create_initial_thread(cap_t root_cnode_cap, cap_t it_pd_cap, vptr_t ui_v_entry, vptr_t bi_frame_vptr,
+                                       vptr_t ipcbuf_vptr, cap_t ipcbuf_cap)
 {
-    pptr_t pptr;
-    cap_t  cap;
-    tcb_t* tcb;
-    deriveCap_ret_t dc_ret;
-
-    /* allocate TCB */
-    pptr = alloc_region(seL4_TCBBits);
-    if (!pptr) {
-        printf("Kernel init failed: Unable to allocate tcb for initial thread\n");
-        return NULL;
-    }
-    memzero((void*)pptr, 1 << seL4_TCBBits);
-    tcb = TCB_PTR(pptr + TCB_OFFSET);
+    tcb_t *tcb = TCB_PTR(rootserver.tcb + TCB_OFFSET);
+#ifndef CONFIG_KERNEL_MCS
     tcb->tcbTimeSlice = CONFIG_TIME_SLICE;
+#endif
+
     Arch_initContext(&tcb->tcbArch.tcbContext);
 
     /* derive a copy of the IPC buffer cap for inserting */
-    dc_ret = deriveCap(SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapInitThreadIPCBuffer), ipcbuf_cap);
+    deriveCap_ret_t dc_ret = deriveCap(SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapInitThreadIPCBuffer), ipcbuf_cap);
     if (dc_ret.status != EXCEPTION_NONE) {
         printf("Failed to derive copy of IPC Buffer\n");
         return NULL;
@@ -14490,42 +15290,56 @@ create_initial_thread(
     cteInsert(
         root_cnode_cap,
         SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapInitThreadCNode),
-        SLOT_PTR(pptr, tcbCTable)
+        SLOT_PTR(rootserver.tcb, tcbCTable)
     );
     cteInsert(
         it_pd_cap,
         SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapInitThreadVSpace),
-        SLOT_PTR(pptr, tcbVTable)
+        SLOT_PTR(rootserver.tcb, tcbVTable)
     );
     cteInsert(
         dc_ret.cap,
         SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapInitThreadIPCBuffer),
-        SLOT_PTR(pptr, tcbBuffer)
+        SLOT_PTR(rootserver.tcb, tcbBuffer)
     );
     tcb->tcbIPCBuffer = ipcbuf_vptr;
-
-    /* Set the root thread's IPC buffer */
-    Arch_setTCBIPCBuffer(tcb, ipcbuf_vptr);
 
     setRegister(tcb, capRegister, bi_frame_vptr);
     setNextPC(tcb, ui_v_entry);
 
     /* initialise TCB */
+#ifdef CONFIG_KERNEL_MCS
+    configure_sched_context(tcb, SC_PTR(rootserver.sc), usToTicks(CONFIG_BOOT_THREAD_TIME_SLICE * US_IN_MS));
+#endif
+
     tcb->tcbPriority = seL4_MaxPrio;
     tcb->tcbMCP = seL4_MaxPrio;
+    tcb->tcbDomain = ksDomSchedule[ksDomScheduleIdx].domain;
+#ifndef CONFIG_KERNEL_MCS
     setupReplyMaster(tcb);
+#endif
     setThreadState(tcb, ThreadState_Running);
 
     ksCurDomain = ksDomSchedule[ksDomScheduleIdx].domain;
+#ifdef CONFIG_KERNEL_MCS
+    ksDomainTime = usToTicks(ksDomSchedule[ksDomScheduleIdx].length * US_IN_MS);
+#else
     ksDomainTime = ksDomSchedule[ksDomScheduleIdx].length;
+#endif
     assert(ksCurDomain < CONFIG_NUM_DOMAINS && ksDomainTime > 0);
 
+#ifndef CONFIG_KERNEL_MCS
     SMP_COND_STATEMENT(tcb->tcbAffinity = 0);
+#endif
 
     /* create initial thread's TCB cap */
-    cap = cap_thread_cap_new(TCB_REF(tcb));
+    cap_t cap = cap_thread_cap_new(TCB_REF(tcb));
     write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapInitThreadTCB), cap);
 
+#ifdef CONFIG_KERNEL_MCS
+    cap = cap_sched_context_cap_new(SC_REF(tcb->tcbSchedContext), seL4_MinSchedContextBits);
+    write_slot(SLOT_PTR(pptr_of_cap(root_cnode_cap), seL4_CapInitThreadSC), cap);
+#endif
 #ifdef CONFIG_DEBUG_BUILD
     setThreadName(tcb, "rootserver");
 #endif
@@ -14533,8 +15347,27 @@ create_initial_thread(
     return tcb;
 }
 
-BOOT_CODE void
-init_core_state(tcb_t *scheduler_action)
+#ifdef ENABLE_SMP_CLOCK_SYNC_TEST_ON_BOOT
+BOOT_CODE void clock_sync_test(void)
+{
+    ticks_t t, t0;
+    ticks_t margin = usToTicks(1) + getTimerPrecision();
+
+    assert(getCurrentCPUIndex() != 0);
+    t = NODE_STATE_ON_CORE(ksCurTime, 0);
+    do {
+        /* perform a memory acquire to get new values of ksCurTime */
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        t0 = NODE_STATE_ON_CORE(ksCurTime, 0);
+    } while (t0 == t);
+    t = getCurrentTime();
+    printf("clock_sync_test[%d]: t0 = %"PRIu64", t = %"PRIu64", td = %"PRIi64"\n",
+           (int)getCurrentCPUIndex(), t0, t, t - t0);
+    assert(t0 <= margin + t && t <= t0 + margin);
+}
+#endif
+
+BOOT_CODE void init_core_state(tcb_t *scheduler_action)
 {
 #ifdef CONFIG_HAVE_FPU
     NODE_STATE(ksActiveFPUState) = NULL;
@@ -14543,17 +15376,52 @@ init_core_state(tcb_t *scheduler_action)
     /* add initial threads to the debug queue */
     NODE_STATE(ksDebugTCBs) = NULL;
     if (scheduler_action != SchedulerAction_ResumeCurrentThread &&
-            scheduler_action != SchedulerAction_ChooseNewThread) {
+        scheduler_action != SchedulerAction_ChooseNewThread) {
         tcbDebugAppend(scheduler_action);
     }
     tcbDebugAppend(NODE_STATE(ksIdleThread));
 #endif
     NODE_STATE(ksSchedulerAction) = scheduler_action;
     NODE_STATE(ksCurThread) = NODE_STATE(ksIdleThread);
+#ifdef CONFIG_KERNEL_MCS
+    NODE_STATE(ksCurSC) = NODE_STATE(ksCurThread->tcbSchedContext);
+    NODE_STATE(ksConsumed) = 0;
+    NODE_STATE(ksReprogram) = true;
+    NODE_STATE(ksReleaseHead) = NULL;
+    NODE_STATE(ksCurTime) = getCurrentTime();
+#endif
 }
 
-BOOT_CODE static bool_t
-provide_untyped_cap(
+/**
+ * Sanity check if a kernel-virtual pointer is in the kernel window that maps
+ * physical memory.
+ *
+ * This check is necessary, but not sufficient, because it only checks for the
+ * pointer interval, not for any potential holes in the memory window.
+ *
+ * @param pptr the pointer to check
+ * @return false if the pointer is definitely not in the kernel window, true
+ *         otherwise.
+ */
+BOOT_CODE static bool_t pptr_in_kernel_window(pptr_t pptr)
+{
+    return pptr >= PPTR_BASE && pptr < PPTR_TOP;
+}
+
+/**
+ * Create an untyped cap, store it in a cnode and mark it in boot info.
+ *
+ * The function can fail if basic sanity checks fail, or if there is no space in
+ * boot info or cnode to store the cap.
+ *
+ * @param root_cnode_cap cap to the cnode to store the untyped cap in
+ * @param device_memory true if the cap to create is a device untyped
+ * @param pptr the kernel-virtual address of the untyped
+ * @param size_bits the size of the untyped in bits
+ * @param first_untyped_slot next available slot in the boot info structure
+ * @return true on success, false on failure
+ */
+BOOT_CODE static bool_t provide_untyped_cap(
     cap_t      root_cnode_cap,
     bool_t     device_memory,
     pptr_t     pptr,
@@ -14563,10 +15431,45 @@ provide_untyped_cap(
 {
     bool_t ret;
     cap_t ut_cap;
+
+    /* Since we are in boot code, we can do extensive error checking and
+       return failure if anything unexpected happens. */
+
+    /* Bounds check for size parameter */
+    if (size_bits > seL4_MaxUntypedBits || size_bits < seL4_MinUntypedBits) {
+        printf("Kernel init: Invalid untyped size %"SEL4_PRIu_word"\n", size_bits);
+        return false;
+    }
+
+    /* All cap ptrs must be aligned to object size */
+    if (!IS_ALIGNED(pptr, size_bits)) {
+        printf("Kernel init: Unaligned untyped pptr %p (alignment %"SEL4_PRIu_word")\n", (void *)pptr, size_bits);
+        return false;
+    }
+
+    /* All cap ptrs apart from device untypeds must be in the kernel window. */
+    if (!device_memory && !pptr_in_kernel_window(pptr)) {
+        printf("Kernel init: Non-device untyped pptr %p outside kernel window\n",
+               (void *)pptr);
+        return false;
+    }
+
+    /* Check that the end of the region is also in the kernel window, so we don't
+       need to assume that the kernel window is aligned up to potentially
+       seL4_MaxUntypedBits. */
+    if (!device_memory && !pptr_in_kernel_window(pptr + MASK(size_bits))) {
+        printf("Kernel init: End of non-device untyped at %p outside kernel window (size %"SEL4_PRIu_word")\n",
+               (void *)pptr, size_bits);
+        return false;
+    }
+
     word_t i = ndks_boot.slot_pos_cur - first_untyped_slot;
     if (i < CONFIG_MAX_NUM_BOOTINFO_UNTYPED_CAPS) {
         ndks_boot.bi_frame->untypedList[i] = (seL4_UntypedDesc) {
-            pptr_to_paddr((void*)pptr), 0, 0, size_bits, device_memory
+            .paddr    = pptr_to_paddr((void *)pptr),
+            .sizeBits = size_bits,
+            .isDevice = device_memory,
+            .padding  = {0}
         };
         ut_cap = cap_untyped_cap_new(MAX_FREE_INDEX(size_bits),
                                      device_memory, size_bits, pptr);
@@ -14578,35 +15481,57 @@ provide_untyped_cap(
     return ret;
 }
 
-BOOT_CODE bool_t
-create_untypeds_for_region(
+/**
+ * Create untyped caps for a region of kernel-virtual memory.
+ *
+ * Takes care of alignement, size and potentially wrapping memory regions. It is fine to provide a
+ * region with end < start if the memory is device memory.
+ *
+ * If the region start is not aligned to seL4_MinUntypedBits, the part up to the next aligned
+ * address will be ignored and is lost, because it is too small to create kernel objects in.
+ *
+ * @param root_cnode_cap Cap to the CNode to store the untypeds in.
+ * @param device_memory  Whether the region is device memory.
+ * @param reg Region of kernel-virtual memory. May wrap around.
+ * @param first_untyped_slot First available untyped boot info slot.
+ * @return true on success, false on failure.
+ */
+BOOT_CODE static bool_t create_untypeds_for_region(
     cap_t      root_cnode_cap,
     bool_t     device_memory,
     region_t   reg,
     seL4_SlotPos first_untyped_slot
 )
 {
-    word_t align_bits;
-    word_t size_bits;
-
+    /* This code works with regions that wrap (where end < start), because the loop cuts up the
+       region into size-aligned chunks, one for each cap. Memory chunks that are size-aligned cannot
+       themselves overflow, so they satisfy alignement, size, and overflow conditionds. The region
+       [0..end) is not neccessarily part of the kernel window (depending on the value of PPTR_BASE).
+       This is fine for device untypeds. For normal untypeds, the region is assumed to be fully in
+       the kernel window. This is not checked here. */
     while (!is_reg_empty(reg)) {
-        /* Determine the maximum size of the region */
-        size_bits = seL4_WordBits - 1 - clzl(reg.end - reg.start);
 
-        /* Determine the alignment of the region */
-        if (reg.start != 0) {
-            align_bits = ctzl(reg.start);
-        } else {
-            align_bits = size_bits;
-        }
-        /* Reduce size bits to align if needed */
-        if (align_bits < size_bits) {
-            size_bits = align_bits;
-        }
+        /* Calculate the bit size of the region. This is also correct for end < start: it will
+           return the correct size of the set [start..-1] union [0..end). This will then be too
+           large for alignment, so the code further down will reduce the size. */
+        unsigned int size_bits = seL4_WordBits - 1 - clzl(reg.end - reg.start);
+        /* The size can't exceed the largest possible untyped size. */
         if (size_bits > seL4_MaxUntypedBits) {
             size_bits = seL4_MaxUntypedBits;
         }
-
+        /* The start address 0 satisfies any alignment needs, otherwise ensure
+         * the region's bit size does not exceed the alignment of the region.
+         */
+        if (0 != reg.start) {
+            unsigned int align_bits = ctzl(reg.start);
+            if (size_bits > align_bits) {
+                size_bits = align_bits;
+            }
+        }
+        /* Provide an untyped capability for the region only if it is large
+         * enough to be retyped into objects later. Otherwise the region can't
+         * be used anyway.
+         */
         if (size_bits >= seL4_MinUntypedBits) {
             if (!provide_untyped_cap(root_cnode_cap, device_memory, reg.start, size_bits, first_untyped_slot)) {
                 return false;
@@ -14617,22 +15542,119 @@ create_untypeds_for_region(
     return true;
 }
 
-BOOT_CODE bool_t
-create_kernel_untypeds(cap_t root_cnode_cap, region_t boot_mem_reuse_reg, seL4_SlotPos first_untyped_slot)
+BOOT_CODE bool_t create_untypeds(cap_t root_cnode_cap,
+                                 region_t boot_mem_reuse_reg)
 {
-    word_t     i;
-    region_t   reg;
+    seL4_SlotPos first_untyped_slot = ndks_boot.slot_pos_cur;
+
+    paddr_t start = 0;
+    for (word_t i = 0; i < ndks_boot.resv_count; i++) {
+        if (start < ndks_boot.reserved[i].start) {
+            region_t reg = paddr_to_pptr_reg((p_region_t) {
+                start, ndks_boot.reserved[i].start
+            });
+            if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot)) {
+                printf("ERROR: creation of untypeds for device region #%u at"
+                       " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word"] failed\n",
+                       (unsigned int)i, reg.start, reg.end);
+                return false;
+            }
+        }
+
+        start = ndks_boot.reserved[i].end;
+    }
+
+    if (start < CONFIG_PADDR_USER_DEVICE_TOP) {
+        region_t reg = paddr_to_pptr_reg((p_region_t) {
+            start, CONFIG_PADDR_USER_DEVICE_TOP
+        });
+
+        if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot)) {
+            printf("ERROR: creation of untypeds for top device region"
+                   " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word"] failed\n",
+                   reg.start, reg.end);
+            return false;
+        }
+    }
 
     /* if boot_mem_reuse_reg is not empty, we can create UT objs from boot code/data frames */
     if (!create_untypeds_for_region(root_cnode_cap, false, boot_mem_reuse_reg, first_untyped_slot)) {
+        printf("ERROR: creation of untypeds for recycled boot memory"
+               " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word"] failed\n",
+               boot_mem_reuse_reg.start, boot_mem_reuse_reg.end);
         return false;
     }
 
     /* convert remaining freemem into UT objects and provide the caps */
-    for (i = 0; i < MAX_NUM_FREEMEM_REG; i++) {
-        reg = ndks_boot.freemem[i];
+    for (word_t i = 0; i < ARRAY_SIZE(ndks_boot.freemem); i++) {
+        region_t reg = ndks_boot.freemem[i];
         ndks_boot.freemem[i] = REG_EMPTY;
         if (!create_untypeds_for_region(root_cnode_cap, false, reg, first_untyped_slot)) {
+            printf("ERROR: creation of untypeds for free memory region #%u at"
+                   " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word"] failed\n",
+                   (unsigned int)i, reg.start, reg.end);
+            return false;
+        }
+    }
+
+    ndks_boot.bi_frame->untyped = (seL4_SlotRegion) {
+        .start = first_untyped_slot,
+        .end   = ndks_boot.slot_pos_cur
+    };
+
+    return true;
+}
+
+BOOT_CODE void bi_finalise(void)
+{
+    ndks_boot.bi_frame->empty = (seL4_SlotRegion) {
+        .start = ndks_boot.slot_pos_cur,
+        .end   = BIT(CONFIG_ROOT_CNODE_SIZE_BITS)
+    };
+}
+
+BOOT_CODE static inline pptr_t ceiling_kernel_window(pptr_t p)
+{
+    /* Adjust address if it exceeds the kernel window
+     * Note that we compare physical address in case of overflow.
+     */
+    if (pptr_to_paddr((void *)p) > PADDR_TOP) {
+        p = PPTR_TOP;
+    }
+    return p;
+}
+
+BOOT_CODE static bool_t check_available_memory(word_t n_available,
+                                               const p_region_t *available)
+{
+    /* The system configuration is broken if no region is available. */
+    if (0 == n_available) {
+        printf("ERROR: no memory regions available\n");
+        return false;
+    }
+
+    printf("available phys memory regions: %"SEL4_PRIu_word"\n", n_available);
+    /* Force ordering and exclusivity of available regions. */
+    for (word_t i = 0; i < n_available; i++) {
+        const p_region_t *r = &available[i];
+        printf("  [%"SEL4_PRIx_word"..%"SEL4_PRIx_word"]\n", r->start, r->end);
+
+        /* Available regions must be sane */
+        if (r->start > r->end) {
+            printf("ERROR: memory region %"SEL4_PRIu_word" has start > end\n", i);
+            return false;
+        }
+
+        /* Available regions can't be empty. */
+        if (r->start == r->end) {
+            printf("ERROR: memory region %"SEL4_PRIu_word" empty\n", i);
+            return false;
+        }
+
+        /* Regions must be ordered and must not overlap. Regions are [start..end),
+           so the == case is fine. Directly adjacent regions are allowed. */
+        if ((i > 0) && (r->start < available[i - 1].end)) {
+            printf("ERROR: memory region %d in wrong order\n", (int)i);
             return false;
         }
     }
@@ -14640,24 +15662,189 @@ create_kernel_untypeds(cap_t root_cnode_cap, region_t boot_mem_reuse_reg, seL4_S
     return true;
 }
 
-BOOT_CODE void
-bi_finalise(void)
+
+BOOT_CODE static bool_t check_reserved_memory(word_t n_reserved,
+                                              const region_t *reserved)
 {
-    seL4_SlotPos slot_pos_start = ndks_boot.slot_pos_cur;
-    seL4_SlotPos slot_pos_end = ndks_boot.slot_pos_max;
-    ndks_boot.bi_frame->empty = (seL4_SlotRegion) {
-        slot_pos_start, slot_pos_end
-    };
+    printf("reserved virt address space regions: %"SEL4_PRIu_word"\n",
+           n_reserved);
+    /* Force ordering and exclusivity of reserved regions. */
+    for (word_t i = 0; i < n_reserved; i++) {
+        const region_t *r = &reserved[i];
+        printf("  [%"SEL4_PRIx_word"..%"SEL4_PRIx_word"]\n", r->start, r->end);
+
+        /* Reserved regions must be sane, the size is allowed to be zero. */
+        if (r->start > r->end) {
+            printf("ERROR: reserved region %"SEL4_PRIu_word" has start > end\n", i);
+            return false;
+        }
+
+        /* Regions must be ordered and must not overlap. Regions are [start..end),
+           so the == case is fine. Directly adjacent regions are allowed. */
+        if ((i > 0) && (r->start < reserved[i - 1].end)) {
+            printf("ERROR: reserved region %"SEL4_PRIu_word" in wrong order\n", i);
+            return false;
+        }
+    }
+
+    return true;
 }
 
+/* we can't declare arrays on the stack, so this is space for
+ * the function below to use. */
+BOOT_BSS static region_t avail_reg[MAX_NUM_FREEMEM_REG];
+/**
+ * Dynamically initialise the available memory on the platform.
+ * A region represents an area of memory.
+ */
+BOOT_CODE bool_t init_freemem(word_t n_available, const p_region_t *available,
+                              word_t n_reserved, const region_t *reserved,
+                              v_region_t it_v_reg, word_t extra_bi_size_bits)
+{
+
+    if (!check_available_memory(n_available, available)) {
+        return false;
+    }
+
+    if (!check_reserved_memory(n_reserved, reserved)) {
+        return false;
+    }
+
+    for (word_t i = 0; i < ARRAY_SIZE(ndks_boot.freemem); i++) {
+        ndks_boot.freemem[i] = REG_EMPTY;
+    }
+
+    /* convert the available regions to pptrs */
+    for (word_t i = 0; i < n_available; i++) {
+        avail_reg[i] = paddr_to_pptr_reg(available[i]);
+        avail_reg[i].end = ceiling_kernel_window(avail_reg[i].end);
+        avail_reg[i].start = ceiling_kernel_window(avail_reg[i].start);
+    }
+
+    word_t a = 0;
+    word_t r = 0;
+    /* Now iterate through the available regions, removing any reserved regions. */
+    while (a < n_available && r < n_reserved) {
+        if (reserved[r].start == reserved[r].end) {
+            /* reserved region is empty - skip it */
+            r++;
+        } else if (avail_reg[a].start >= avail_reg[a].end) {
+            /* skip the entire region - it's empty now after trimming */
+            a++;
+        } else if (reserved[r].end <= avail_reg[a].start) {
+            /* the reserved region is below the available region - skip it */
+            reserve_region(pptr_to_paddr_reg(reserved[r]));
+            r++;
+        } else if (reserved[r].start >= avail_reg[a].end) {
+            /* the reserved region is above the available region - take the whole thing */
+            insert_region(avail_reg[a]);
+            a++;
+        } else {
+            /* the reserved region overlaps with the available region */
+            if (reserved[r].start <= avail_reg[a].start) {
+                /* the region overlaps with the start of the available region.
+                 * trim start of the available region */
+                avail_reg[a].start = MIN(avail_reg[a].end, reserved[r].end);
+                reserve_region(pptr_to_paddr_reg(reserved[r]));
+                r++;
+            } else {
+                assert(reserved[r].start < avail_reg[a].end);
+                /* take the first chunk of the available region and move
+                 * the start to the end of the reserved region */
+                region_t m = avail_reg[a];
+                m.end = reserved[r].start;
+                insert_region(m);
+                if (avail_reg[a].end > reserved[r].end) {
+                    avail_reg[a].start = reserved[r].end;
+                    reserve_region(pptr_to_paddr_reg(reserved[r]));
+                    r++;
+                } else {
+                    a++;
+                }
+            }
+        }
+    }
+
+    for (; r < n_reserved; r++) {
+        if (reserved[r].start < reserved[r].end) {
+            reserve_region(pptr_to_paddr_reg(reserved[r]));
+        }
+    }
+
+    /* no more reserved regions - add the rest */
+    for (; a < n_available; a++) {
+        if (avail_reg[a].start < avail_reg[a].end) {
+            insert_region(avail_reg[a]);
+        }
+    }
+
+    /* now try to fit the root server objects into a region */
+    int i = ARRAY_SIZE(ndks_boot.freemem) - 1;
+    if (!is_reg_empty(ndks_boot.freemem[i])) {
+        printf("ERROR: insufficient MAX_NUM_FREEMEM_REG (%u)\n",
+               (unsigned int)MAX_NUM_FREEMEM_REG);
+        return false;
+    }
+    /* skip any empty regions */
+    for (; i >= 0 && is_reg_empty(ndks_boot.freemem[i]); i--);
+
+    /* try to grab the last available p region to create the root server objects
+     * from. If possible, retain any left over memory as an extra p region */
+    word_t size = calculate_rootserver_size(it_v_reg, extra_bi_size_bits);
+    word_t max = rootserver_max_size_bits(extra_bi_size_bits);
+    for (; i >= 0; i--) {
+        /* Invariant: both i and (i + 1) are valid indices in ndks_boot.freemem. */
+        assert(i < ARRAY_SIZE(ndks_boot.freemem) - 1);
+        /* Invariant; the region at index i is the current candidate.
+         * Invariant: regions 0 up to (i - 1), if any, are additional candidates.
+         * Invariant: region (i + 1) is empty. */
+        assert(is_reg_empty(ndks_boot.freemem[i + 1]));
+        /* Invariant: regions above (i + 1), if any, are empty or too small to use.
+         * Invariant: all non-empty regions are ordered, disjoint and unallocated. */
+
+        /* We make a fresh variable to index the known-empty region, because the
+         * SimplExportAndRefine verification test has poor support for array
+         * indices that are sums of variables and small constants. */
+        int empty_index = i + 1;
+
+        /* Try to take the top-most suitably sized and aligned chunk. */
+        pptr_t unaligned_start = ndks_boot.freemem[i].end - size;
+        pptr_t start = ROUND_DOWN(unaligned_start, max);
+        /* if unaligned_start didn't underflow, and start fits in the region,
+         * then we've found a region that fits the root server objects. */
+        if (unaligned_start <= ndks_boot.freemem[i].end
+            && start >= ndks_boot.freemem[i].start) {
+            create_rootserver_objects(start, it_v_reg, extra_bi_size_bits);
+            /* There may be leftovers before and after the memory we used. */
+            /* Shuffle the after leftover up to the empty slot (i + 1). */
+            ndks_boot.freemem[empty_index] = (region_t) {
+                .start = start + size,
+                .end = ndks_boot.freemem[i].end
+            };
+            /* Leave the before leftover in current slot i. */
+            ndks_boot.freemem[i].end = start;
+            /* Regions i and (i + 1) are now well defined, ordered, disjoint,
+             * and unallocated, so we can return successfully. */
+            return true;
+        }
+        /* Region i isn't big enough, so shuffle it up to slot (i + 1),
+         * which we know is unused. */
+        ndks_boot.freemem[empty_index] = ndks_boot.freemem[i];
+        /* Now region i is unused, so make it empty to reestablish the invariant
+         * for the next iteration (when it will be slot i + 1). */
+        ndks_boot.freemem[i] = REG_EMPTY;
+    }
+
+    /* We didn't find a big enough region. */
+    printf("ERROR: no free memory region is big enough for root server "
+           "objects, need size/alignment of 2^%"SEL4_PRIu_word"\n", max);
+    return false;
+}
+#line 1 "/Users/payas/git/seL4/src/kernel/cspace.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <types.h>
@@ -14666,10 +15853,9 @@ bi_finalise(void)
 #include <kernel/thread.h>
 #include <kernel/cspace.h>
 #include <model/statedata.h>
-#include <arch/x86/arch/machine.h>
+#include <arch/machine.h>
 
-lookupCap_ret_t
-lookupCap(tcb_t *thread, cptr_t cPtr)
+lookupCap_ret_t lookupCap(tcb_t *thread, cptr_t cPtr)
 {
     lookupSlot_raw_ret_t lu_ret;
     lookupCap_ret_t ret;
@@ -14686,8 +15872,7 @@ lookupCap(tcb_t *thread, cptr_t cPtr)
     return ret;
 }
 
-lookupCapAndSlot_ret_t
-lookupCapAndSlot(tcb_t *thread, cptr_t cPtr)
+lookupCapAndSlot_ret_t lookupCapAndSlot(tcb_t *thread, cptr_t cPtr)
 {
     lookupSlot_raw_ret_t lu_ret;
     lookupCapAndSlot_ret_t ret;
@@ -14706,8 +15891,7 @@ lookupCapAndSlot(tcb_t *thread, cptr_t cPtr)
     return ret;
 }
 
-lookupSlot_raw_ret_t
-lookupSlot(tcb_t *thread, cptr_t capptr)
+lookupSlot_raw_ret_t lookupSlot(tcb_t *thread, cptr_t capptr)
 {
     cap_t threadRoot;
     resolveAddressBits_ret_t res_ret;
@@ -14721,9 +15905,8 @@ lookupSlot(tcb_t *thread, cptr_t capptr)
     return ret;
 }
 
-lookupSlot_ret_t
-lookupSlotForCNodeOp(bool_t isSource, cap_t root, cptr_t capptr,
-                     word_t depth)
+lookupSlot_ret_t lookupSlotForCNodeOp(bool_t isSource, cap_t root, cptr_t capptr,
+                                      word_t depth)
 {
     resolveAddressBits_ret_t res_ret;
     lookupSlot_ret_t ret;
@@ -14768,26 +15951,22 @@ lookupSlotForCNodeOp(bool_t isSource, cap_t root, cptr_t capptr,
     return ret;
 }
 
-lookupSlot_ret_t
-lookupSourceSlot(cap_t root, cptr_t capptr, word_t depth)
+lookupSlot_ret_t lookupSourceSlot(cap_t root, cptr_t capptr, word_t depth)
 {
     return lookupSlotForCNodeOp(true, root, capptr, depth);
 }
 
-lookupSlot_ret_t
-lookupTargetSlot(cap_t root, cptr_t capptr, word_t depth)
+lookupSlot_ret_t lookupTargetSlot(cap_t root, cptr_t capptr, word_t depth)
 {
     return lookupSlotForCNodeOp(false, root, capptr, depth);
 }
 
-lookupSlot_ret_t
-lookupPivotSlot(cap_t root, cptr_t capptr, word_t depth)
+lookupSlot_ret_t lookupPivotSlot(cap_t root, cptr_t capptr, word_t depth)
 {
     return lookupSlotForCNodeOp(true, root, capptr, depth);
 }
 
-resolveAddressBits_ret_t
-resolveAddressBits(cap_t nodeCap, cptr_t capptr, word_t n_bits)
+resolveAddressBits_ret_t resolveAddressBits(cap_t nodeCap, cptr_t capptr, word_t n_bits)
 {
     resolveAddressBits_ret_t ret;
     word_t radixBits, guardBits, levelBits, guard;
@@ -14813,10 +15992,10 @@ resolveAddressBits(cap_t nodeCap, cptr_t capptr, word_t n_bits)
 
         capGuard = cap_cnode_cap_get_capCNodeGuard(nodeCap);
 
-        /* sjw --- the MASK(5) here is to avoid the case where n_bits = 32
-           and guardBits = 0, as it violates the C spec to >> by more
-           than 31 */
-
+        /* The MASK(wordRadix) here is to avoid the case where
+         * n_bits = wordBits (=2^wordRadix) and guardBits = 0, as it violates
+         * the C spec to shift right by more than wordBits-1.
+         */
         guard = (capptr >> ((n_bits - guardBits) & MASK(wordRadix))) & MASK(guardBits);
         if (unlikely(guardBits > n_bits || guard != capGuard)) {
             current_lookup_fault =
@@ -14835,7 +16014,7 @@ resolveAddressBits(cap_t nodeCap, cptr_t capptr, word_t n_bits)
         offset = (capptr >> (n_bits - levelBits)) & MASK(radixBits);
         slot = CTE_PTR(cap_cnode_cap_get_capCNodePtr(nodeCap)) + offset;
 
-        if (likely(n_bits <= levelBits)) {
+        if (likely(n_bits == levelBits)) {
             ret.status = EXCEPTION_NONE;
             ret.slot = slot;
             ret.bitsRemaining = 0;
@@ -14855,18 +16034,13 @@ resolveAddressBits(cap_t nodeCap, cptr_t capptr, word_t n_bits)
         }
     }
 
-    ret.status = EXCEPTION_NONE;
-    return ret;
+    UNREACHABLE();
 }
-
+#line 1 "/Users/payas/git/seL4/src/kernel/faulthandler.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <api/failures.h>
@@ -14874,10 +16048,48 @@ resolveAddressBits(cap_t nodeCap, cptr_t capptr, word_t n_bits)
 #include <kernel/faulthandler.h>
 #include <kernel/thread.h>
 #include <machine/io.h>
-#include <arch/x86/arch/machine.h>
+#include <arch/machine.h>
 
-void
-handleFault(tcb_t *tptr)
+#ifdef CONFIG_KERNEL_MCS
+void handleFault(tcb_t *tptr)
+{
+    bool_t hasFaultHandler = sendFaultIPC(tptr, TCB_PTR_CTE_PTR(tptr, tcbFaultHandler)->cap,
+                                          tptr->tcbSchedContext != NULL);
+    if (!hasFaultHandler) {
+        handleNoFaultHandler(tptr);
+    }
+}
+
+void handleTimeout(tcb_t *tptr)
+{
+    assert(validTimeoutHandler(tptr));
+    sendFaultIPC(tptr, TCB_PTR_CTE_PTR(tptr, tcbTimeoutHandler)->cap, false);
+}
+
+bool_t sendFaultIPC(tcb_t *tptr, cap_t handlerCap, bool_t can_donate)
+{
+    if (cap_get_capType(handlerCap) == cap_endpoint_cap) {
+        assert(cap_endpoint_cap_get_capCanSend(handlerCap));
+        assert(cap_endpoint_cap_get_capCanGrant(handlerCap) ||
+               cap_endpoint_cap_get_capCanGrantReply(handlerCap));
+
+        tptr->tcbFault = current_fault;
+        sendIPC(true, false,
+                cap_endpoint_cap_get_capEPBadge(handlerCap),
+                cap_endpoint_cap_get_capCanGrant(handlerCap),
+                cap_endpoint_cap_get_capCanGrantReply(handlerCap),
+                can_donate, tptr,
+                EP_PTR(cap_endpoint_cap_get_capEPPtr(handlerCap)));
+
+        return true;
+    } else {
+        assert(cap_get_capType(handlerCap) == cap_null_cap);
+        return false;
+    }
+}
+#else
+
+void handleFault(tcb_t *tptr)
 {
     exception_t status;
     seL4_Fault_t fault = current_fault;
@@ -14888,8 +16100,7 @@ handleFault(tcb_t *tptr)
     }
 }
 
-exception_t
-sendFaultIPC(tcb_t *tptr)
+exception_t sendFaultIPC(tcb_t *tptr)
 {
     cptr_t handlerCPtr;
     cap_t  handlerCap;
@@ -14907,15 +16118,16 @@ sendFaultIPC(tcb_t *tptr)
     handlerCap = lu_ret.cap;
 
     if (cap_get_capType(handlerCap) == cap_endpoint_cap &&
-            cap_endpoint_cap_get_capCanSend(handlerCap) &&
-            cap_endpoint_cap_get_capCanGrant(handlerCap)) {
+        cap_endpoint_cap_get_capCanSend(handlerCap) &&
+        (cap_endpoint_cap_get_capCanGrant(handlerCap) ||
+         cap_endpoint_cap_get_capCanGrantReply(handlerCap))) {
         tptr->tcbFault = current_fault;
         if (seL4_Fault_get_seL4_FaultType(current_fault) == seL4_Fault_CapFault) {
             tptr->tcbLookupFailure = original_lookup_fault;
         }
-        sendIPC(true, false,
+        sendIPC(true, true,
                 cap_endpoint_cap_get_capEPBadge(handlerCap),
-                true, tptr,
+                cap_endpoint_cap_get_capCanGrant(handlerCap), true, tptr,
                 EP_PTR(cap_endpoint_cap_get_capEPPtr(handlerCap)));
 
         return EXCEPTION_NONE;
@@ -14926,10 +16138,10 @@ sendFaultIPC(tcb_t *tptr)
         return EXCEPTION_FAULT;
     }
 }
+#endif
 
 #ifdef CONFIG_PRINTING
-static void
-print_fault(seL4_Fault_t f)
+static void print_fault(seL4_Fault_t f)
 {
     switch (seL4_Fault_get_seL4_FaultType(f)) {
     case seL4_Fault_NullFault:
@@ -14955,6 +16167,11 @@ print_fault(seL4_Fault_t f)
                (void *)seL4_Fault_UserException_get_number(f),
                (void *)seL4_Fault_UserException_get_code(f));
         break;
+#ifdef CONFIG_KERNEL_MCS
+    case seL4_Fault_Timeout:
+        printf("Timeout fault for 0x%x\n", (unsigned int) seL4_Fault_Timeout_get_badge(f));
+        break;
+#endif
     default:
         printf("unknown fault");
         break;
@@ -14962,53 +16179,51 @@ print_fault(seL4_Fault_t f)
 }
 #endif
 
+#ifdef CONFIG_KERNEL_MCS
+void handleNoFaultHandler(tcb_t *tptr)
+#else
 /* The second fault, ex2, is stored in the global current_fault */
-void
-handleDoubleFault(tcb_t *tptr, seL4_Fault_t ex1)
+void handleDoubleFault(tcb_t *tptr, seL4_Fault_t ex1)
+#endif
 {
 #ifdef CONFIG_PRINTING
+#ifdef CONFIG_KERNEL_MCS
+    printf("Found thread has no fault handler while trying to handle:\n");
+    print_fault(current_fault);
+#else
     seL4_Fault_t ex2 = current_fault;
     printf("Caught ");
     print_fault(ex2);
     printf("\nwhile trying to handle:\n");
     print_fault(ex1);
-
+#endif
 #ifdef CONFIG_DEBUG_BUILD
-    printf("\nin thread %p \"%s\" ", tptr, tptr->tcbName);
+    printf("\nin thread %p \"%s\" ", tptr, TCB_PTR_DEBUG_PTR(tptr)->tcbName);
 #endif /* CONFIG_DEBUG_BUILD */
 
-    printf("at address %p\n", (void*)getRestartPC(tptr));
+    printf("at address %p\n", (void *)getRestartPC(tptr));
     printf("With stack:\n");
     Arch_userStackTrace(tptr);
 #endif
 
     setThreadState(tptr, ThreadState_Inactive);
 }
-
+#line 1 "/Users/payas/git/seL4/src/kernel/stack.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
+
 #include <kernel/stack.h>
 
 VISIBLE ALIGN(KERNEL_STACK_ALIGNMENT)
 char kernel_stack_alloc[CONFIG_MAX_NUM_NODES][BIT(CONFIG_KERNEL_STACK_BITS)];
-
+#line 1 "/Users/payas/git/seL4/src/kernel/thread.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -15019,43 +16234,35 @@ char kernel_stack_alloc[CONFIG_MAX_NUM_NODES][BIT(CONFIG_KERNEL_STACK_BITS)];
 #include <kernel/cspace.h>
 #include <kernel/thread.h>
 #include <kernel/vspace.h>
+#ifdef CONFIG_KERNEL_MCS
+#include <object/schedcontext.h>
+#endif
 #include <model/statedata.h>
-#include <arch/x86/arch/machine.h>
-#include <arch/x86/arch/kernel/thread.h>
+#include <arch/machine.h>
+#include <arch/kernel/thread.h>
 #include <machine/registerset.h>
 #include <linker.h>
 
 static seL4_MessageInfo_t
-transferCaps(seL4_MessageInfo_t info, extra_caps_t caps,
+transferCaps(seL4_MessageInfo_t info,
              endpoint_t *endpoint, tcb_t *receiver,
              word_t *receiveBuffer);
 
-static inline bool_t PURE
-isBlocked(const tcb_t *thread)
-{
-    switch (thread_state_get_tsType(thread->tcbState)) {
-    case ThreadState_Inactive:
-    case ThreadState_BlockedOnReceive:
-    case ThreadState_BlockedOnSend:
-    case ThreadState_BlockedOnNotification:
-    case ThreadState_BlockedOnReply:
-        return true;
-
-    default:
-        return false;
-    }
-}
-
-BOOT_CODE void
-configureIdleThread(tcb_t *tcb)
+BOOT_CODE void configureIdleThread(tcb_t *tcb)
 {
     Arch_configureIdleThread(tcb);
     setThreadState(tcb, ThreadState_IdleThreadState);
 }
 
-void
-activateThread(void)
+void activateThread(void)
 {
+#ifdef CONFIG_KERNEL_MCS
+    if (unlikely(NODE_STATE(ksCurThread)->tcbYieldTo)) {
+        schedContext_completeYieldTo(NODE_STATE(ksCurThread));
+        assert(thread_state_get_tsType(NODE_STATE(ksCurThread)->tcbState) == ThreadState_Running);
+    }
+#endif
+
     switch (thread_state_get_tsType(NODE_STATE(ksCurThread)->tcbState)) {
     case ThreadState_Running:
 #ifdef CONFIG_VTX
@@ -15081,29 +16288,50 @@ activateThread(void)
     }
 }
 
-void
-suspend(tcb_t *target)
+void suspend(tcb_t *target)
 {
     cancelIPC(target);
+    if (thread_state_get_tsType(target->tcbState) == ThreadState_Running) {
+        /* whilst in the running state it is possible that restart pc of a thread is
+         * incorrect. As we do not know what state this thread will transition to
+         * after we make it inactive we update its restart pc so that the thread next
+         * runs at the correct address whether it is restarted or moved directly to
+         * running */
+        updateRestartPC(target);
+    }
     setThreadState(target, ThreadState_Inactive);
     tcbSchedDequeue(target);
+#ifdef CONFIG_KERNEL_MCS
+    tcbReleaseRemove(target);
+    schedContext_cancelYieldTo(target);
+#endif
 }
 
-void
-restart(tcb_t *target)
+void restart(tcb_t *target)
 {
-    if (isBlocked(target)) {
+    if (isStopped(target)) {
         cancelIPC(target);
+#ifdef CONFIG_KERNEL_MCS
+        setThreadState(target, ThreadState_Restart);
+        if (sc_sporadic(target->tcbSchedContext)
+            && target->tcbSchedContext != NODE_STATE(ksCurSC)) {
+            refill_unblock_check(target->tcbSchedContext);
+        }
+        schedContext_resume(target->tcbSchedContext);
+        if (isSchedulable(target)) {
+            possibleSwitchTo(target);
+        }
+#else
         setupReplyMaster(target);
         setThreadState(target, ThreadState_Restart);
         SCHED_ENQUEUE(target);
         possibleSwitchTo(target);
+#endif
     }
 }
 
-void
-doIPCTransfer(tcb_t *sender, endpoint_t *endpoint, word_t badge,
-              bool_t grant, tcb_t *receiver)
+void doIPCTransfer(tcb_t *sender, endpoint_t *endpoint, word_t badge,
+                   bool_t grant, tcb_t *receiver)
 {
     void *receiveBuffer, *sendBuffer;
 
@@ -15118,70 +16346,108 @@ doIPCTransfer(tcb_t *sender, endpoint_t *endpoint, word_t badge,
     }
 }
 
-void
-doReplyTransfer(tcb_t *sender, tcb_t *receiver, cte_t *slot)
+#ifdef CONFIG_KERNEL_MCS
+void doReplyTransfer(tcb_t *sender, reply_t *reply, bool_t grant)
+#else
+void doReplyTransfer(tcb_t *sender, tcb_t *receiver, cte_t *slot, bool_t grant)
+#endif
 {
+#ifdef CONFIG_KERNEL_MCS
+    if (reply->replyTCB == NULL ||
+        thread_state_get_tsType(reply->replyTCB->tcbState) != ThreadState_BlockedOnReply) {
+        /* nothing to do */
+        return;
+    }
+
+    tcb_t *receiver = reply->replyTCB;
+    reply_remove(reply, receiver);
+    assert(thread_state_get_replyObject(receiver->tcbState) == REPLY_REF(0));
+    assert(reply->replyTCB == NULL);
+
+    if (sc_sporadic(receiver->tcbSchedContext)
+        && receiver->tcbSchedContext != NODE_STATE_ON_CORE(ksCurSC, receiver->tcbSchedContext->scCore)) {
+        refill_unblock_check(receiver->tcbSchedContext);
+    }
+#else
     assert(thread_state_get_tsType(receiver->tcbState) ==
            ThreadState_BlockedOnReply);
+#endif
 
-    if (likely(seL4_Fault_get_seL4_FaultType(receiver->tcbFault) == seL4_Fault_NullFault)) {
-        doIPCTransfer(sender, NULL, 0, true, receiver);
+    word_t fault_type = seL4_Fault_get_seL4_FaultType(receiver->tcbFault);
+    if (likely(fault_type == seL4_Fault_NullFault)) {
+        doIPCTransfer(sender, NULL, 0, grant, receiver);
+#ifdef CONFIG_KERNEL_MCS
+        setThreadState(receiver, ThreadState_Running);
+#else
         /** GHOSTUPD: "(True, gs_set_assn cteDeleteOne_'proc (ucast cap_reply_cap))" */
         cteDeleteOne(slot);
         setThreadState(receiver, ThreadState_Running);
         possibleSwitchTo(receiver);
+#endif
     } else {
-        bool_t restart;
-
+#ifndef CONFIG_KERNEL_MCS
         /** GHOSTUPD: "(True, gs_set_assn cteDeleteOne_'proc (ucast cap_reply_cap))" */
         cteDeleteOne(slot);
-        restart = handleFaultReply(receiver, sender);
+#endif
+        bool_t restart = handleFaultReply(receiver, sender);
         receiver->tcbFault = seL4_Fault_NullFault_new();
         if (restart) {
             setThreadState(receiver, ThreadState_Restart);
+#ifndef CONFIG_KERNEL_MCS
             possibleSwitchTo(receiver);
+#endif
         } else {
             setThreadState(receiver, ThreadState_Inactive);
         }
     }
+
+#ifdef CONFIG_KERNEL_MCS
+    if (receiver->tcbSchedContext && isRunnable(receiver)) {
+        if ((refill_ready(receiver->tcbSchedContext) && refill_sufficient(receiver->tcbSchedContext, 0))) {
+            possibleSwitchTo(receiver);
+        } else {
+            if (validTimeoutHandler(receiver) && fault_type != seL4_Fault_Timeout) {
+                current_fault = seL4_Fault_Timeout_new(receiver->tcbSchedContext->scBadge);
+                handleTimeout(receiver);
+            } else {
+                postpone(receiver->tcbSchedContext);
+            }
+        }
+    }
+#endif
 }
 
-void
-doNormalTransfer(tcb_t *sender, word_t *sendBuffer, endpoint_t *endpoint,
-                 word_t badge, bool_t canGrant, tcb_t *receiver,
-                 word_t *receiveBuffer)
+void doNormalTransfer(tcb_t *sender, word_t *sendBuffer, endpoint_t *endpoint,
+                      word_t badge, bool_t canGrant, tcb_t *receiver,
+                      word_t *receiveBuffer)
 {
     word_t msgTransferred;
     seL4_MessageInfo_t tag;
     exception_t status;
-    extra_caps_t caps;
 
     tag = messageInfoFromWord(getRegister(sender, msgInfoRegister));
 
     if (canGrant) {
         status = lookupExtraCaps(sender, sendBuffer, tag);
-        caps = current_extra_caps;
         if (unlikely(status != EXCEPTION_NONE)) {
-            caps.excaprefs[0] = NULL;
+            current_extra_caps.excaprefs[0] = NULL;
         }
     } else {
-        caps = current_extra_caps;
-        caps.excaprefs[0] = NULL;
+        current_extra_caps.excaprefs[0] = NULL;
     }
 
     msgTransferred = copyMRs(sender, sendBuffer, receiver, receiveBuffer,
                              seL4_MessageInfo_get_length(tag));
 
-    tag = transferCaps(tag, caps, endpoint, receiver, receiveBuffer);
+    tag = transferCaps(tag, endpoint, receiver, receiveBuffer);
 
     tag = seL4_MessageInfo_set_length(tag, msgTransferred);
     setRegister(receiver, msgInfoRegister, wordFromMessageInfo(tag));
     setRegister(receiver, badgeRegister, badge);
 }
 
-void
-doFaultTransfer(word_t badge, tcb_t *sender, tcb_t *receiver,
-                word_t *receiverIPCBuffer)
+void doFaultTransfer(word_t badge, tcb_t *sender, tcb_t *receiver,
+                     word_t *receiverIPCBuffer)
 {
     word_t sent;
     seL4_MessageInfo_t msgInfo;
@@ -15194,29 +16460,28 @@ doFaultTransfer(word_t badge, tcb_t *sender, tcb_t *receiver,
 }
 
 /* Like getReceiveSlots, this is specialised for single-cap transfer. */
-static seL4_MessageInfo_t
-transferCaps(seL4_MessageInfo_t info, extra_caps_t caps,
-             endpoint_t *endpoint, tcb_t *receiver,
-             word_t *receiveBuffer)
+static seL4_MessageInfo_t transferCaps(seL4_MessageInfo_t info,
+                                       endpoint_t *endpoint, tcb_t *receiver,
+                                       word_t *receiveBuffer)
 {
     word_t i;
-    cte_t* destSlot;
+    cte_t *destSlot;
 
     info = seL4_MessageInfo_set_extraCaps(info, 0);
     info = seL4_MessageInfo_set_capsUnwrapped(info, 0);
 
-    if (likely(!caps.excaprefs[0] || !receiveBuffer)) {
+    if (likely(!current_extra_caps.excaprefs[0] || !receiveBuffer)) {
         return info;
     }
 
     destSlot = getReceiveSlots(receiver, receiveBuffer);
 
-    for (i = 0; i < seL4_MsgMaxExtraCaps && caps.excaprefs[i] != NULL; i++) {
-        cte_t *slot = caps.excaprefs[i];
+    for (i = 0; i < seL4_MsgMaxExtraCaps && current_extra_caps.excaprefs[i] != NULL; i++) {
+        cte_t *slot = current_extra_caps.excaprefs[i];
         cap_t cap = slot->cap;
 
         if (cap_get_capType(cap) == cap_endpoint_cap &&
-                EP_PTR(cap_endpoint_cap_get_capEPPtr(cap)) == endpoint) {
+            EP_PTR(cap_endpoint_cap_get_capEPPtr(cap)) == endpoint) {
             /* If this is a cap to the endpoint on which the message was sent,
              * only transfer the badge, not the cap. */
             setExtraBadge(receiveBuffer,
@@ -15256,20 +16521,48 @@ void doNBRecvFailedTransfer(tcb_t *thread)
     setRegister(thread, badgeRegister, 0);
 }
 
-static void
-nextDomain(void)
+static void nextDomain(void)
 {
     ksDomScheduleIdx++;
     if (ksDomScheduleIdx >= ksDomScheduleLength) {
         ksDomScheduleIdx = 0;
     }
+#ifdef CONFIG_KERNEL_MCS
+    NODE_STATE(ksReprogram) = true;
+#endif
     ksWorkUnitsCompleted = 0;
     ksCurDomain = ksDomSchedule[ksDomScheduleIdx].domain;
+#ifdef CONFIG_KERNEL_MCS
+    ksDomainTime = usToTicks(ksDomSchedule[ksDomScheduleIdx].length * US_IN_MS);
+#else
     ksDomainTime = ksDomSchedule[ksDomScheduleIdx].length;
+#endif
 }
 
-static void
-scheduleChooseNewThread(void)
+#ifdef CONFIG_KERNEL_MCS
+static void switchSchedContext(void)
+{
+    if (unlikely(NODE_STATE(ksCurSC) != NODE_STATE(ksCurThread)->tcbSchedContext)) {
+        NODE_STATE(ksReprogram) = true;
+        if (sc_constant_bandwidth(NODE_STATE(ksCurThread)->tcbSchedContext)) {
+            refill_unblock_check(NODE_STATE(ksCurThread)->tcbSchedContext);
+        }
+
+        assert(refill_ready(NODE_STATE(ksCurThread)->tcbSchedContext));
+        assert(refill_sufficient(NODE_STATE(ksCurThread)->tcbSchedContext, 0));
+    }
+
+    if (NODE_STATE(ksReprogram)) {
+        /* if we are reprogamming, we have acted on the new kernel time and cannot
+         * rollback -> charge the current thread */
+        commitTime();
+    }
+
+    NODE_STATE(ksCurSC) = NODE_STATE(ksCurThread)->tcbSchedContext;
+}
+#endif
+
+static void scheduleChooseNewThread(void)
 {
     if (ksDomainTime == 0) {
         nextDomain();
@@ -15277,12 +16570,16 @@ scheduleChooseNewThread(void)
     chooseThread();
 }
 
-void
-schedule(void)
+void schedule(void)
 {
+#ifdef CONFIG_KERNEL_MCS
+    awaken();
+    checkDomainTime();
+#endif
+
     if (NODE_STATE(ksSchedulerAction) != SchedulerAction_ResumeCurrentThread) {
         bool_t was_runnable;
-        if (isRunnable(NODE_STATE(ksCurThread))) {
+        if (isSchedulable(NODE_STATE(ksCurThread))) {
             was_runnable = true;
             SCHED_ENQUEUE_CURRENT_TCB;
         } else {
@@ -15293,6 +16590,7 @@ schedule(void)
             scheduleChooseNewThread();
         } else {
             tcb_t *candidate = NODE_STATE(ksSchedulerAction);
+            assert(isSchedulable(candidate));
             /* Avoid checking bitmap when ksCurThread is higher prio, to
              * match fast path.
              * Don't look at ksCurThread prio when it's idle, to respect
@@ -15301,7 +16599,7 @@ schedule(void)
                 NODE_STATE(ksCurThread) == NODE_STATE(ksIdleThread)
                 || (candidate->tcbPriority < NODE_STATE(ksCurThread)->tcbPriority);
             if (fastfail &&
-                    !isHighestPrio(ksCurDomain, candidate->tcbPriority)) {
+                !isHighestPrio(ksCurDomain, candidate->tcbPriority)) {
                 SCHED_ENQUEUE(candidate);
                 /* we can't, need to reschedule */
                 NODE_STATE(ksSchedulerAction) = SchedulerAction_ChooseNewThread;
@@ -15324,16 +16622,24 @@ schedule(void)
     doMaskReschedule(ARCH_NODE_STATE(ipiReschedulePending));
     ARCH_NODE_STATE(ipiReschedulePending) = 0;
 #endif /* ENABLE_SMP_SUPPORT */
+
+#ifdef CONFIG_KERNEL_MCS
+    switchSchedContext();
+
+    if (NODE_STATE(ksReprogram)) {
+        setNextInterrupt();
+        NODE_STATE(ksReprogram) = false;
+    }
+#endif
 }
 
-void
-chooseThread(void)
+void chooseThread(void)
 {
     word_t prio;
     word_t dom;
     tcb_t *thread;
 
-    if (CONFIG_NUM_DOMAINS > 1) {
+    if (numDomains > 1) {
         dom = ksCurDomain;
     } else {
         dom = 0;
@@ -15343,16 +16649,26 @@ chooseThread(void)
         prio = getHighestPrio(dom);
         thread = NODE_STATE(ksReadyQueues)[ready_queues_index(dom, prio)].head;
         assert(thread);
-        assert(isRunnable(thread));
+        assert(isSchedulable(thread));
+#ifdef CONFIG_KERNEL_MCS
+        assert(refill_sufficient(thread->tcbSchedContext, 0));
+        assert(refill_ready(thread->tcbSchedContext));
+#endif
         switchToThread(thread);
     } else {
         switchToIdleThread();
     }
 }
 
-void
-switchToThread(tcb_t *thread)
+void switchToThread(tcb_t *thread)
 {
+#ifdef CONFIG_KERNEL_MCS
+    assert(thread->tcbSchedContext != NULL);
+    assert(!thread_state_get_tcbInReleaseQueue(thread->tcbState));
+    assert(refill_sufficient(thread->tcbSchedContext, 0));
+    assert(refill_ready(thread->tcbSchedContext));
+#endif
+
 #ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
     benchmark_utilisation_switch(NODE_STATE(ksCurThread), thread);
 #endif
@@ -15361,8 +16677,7 @@ switchToThread(tcb_t *thread)
     NODE_STATE(ksCurThread) = thread;
 }
 
-void
-switchToIdleThread(void)
+void switchToIdleThread(void)
 {
 #ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
     benchmark_utilisation_switch(NODE_STATE(ksCurThread), NODE_STATE(ksIdleThread));
@@ -15371,12 +16686,11 @@ switchToIdleThread(void)
     NODE_STATE(ksCurThread) = NODE_STATE(ksIdleThread);
 }
 
-void
-setDomain(tcb_t *tptr, dom_t dom)
+void setDomain(tcb_t *tptr, dom_t dom)
 {
     tcbSchedDequeue(tptr);
     tptr->tcbDomain = dom;
-    if (isRunnable(tptr)) {
+    if (isSchedulable(tptr)) {
         SCHED_ENQUEUE(tptr);
     }
     if (tptr == NODE_STATE(ksCurThread)) {
@@ -15384,67 +16698,165 @@ setDomain(tcb_t *tptr, dom_t dom)
     }
 }
 
-void
-setMCPriority(tcb_t *tptr, prio_t mcp)
+void setMCPriority(tcb_t *tptr, prio_t mcp)
 {
     tptr->tcbMCP = mcp;
 }
-
-void
-setPriority(tcb_t *tptr, prio_t prio)
+#ifdef CONFIG_KERNEL_MCS
+void setPriority(tcb_t *tptr, prio_t prio)
+{
+    switch (thread_state_get_tsType(tptr->tcbState)) {
+    case ThreadState_Running:
+    case ThreadState_Restart:
+        if (thread_state_get_tcbQueued(tptr->tcbState) || tptr == NODE_STATE(ksCurThread)) {
+            tcbSchedDequeue(tptr);
+            tptr->tcbPriority = prio;
+            SCHED_ENQUEUE(tptr);
+            rescheduleRequired();
+        } else {
+            tptr->tcbPriority = prio;
+        }
+        break;
+    case ThreadState_BlockedOnReceive:
+    case ThreadState_BlockedOnSend:
+        tptr->tcbPriority = prio;
+        reorderEP(EP_PTR(thread_state_get_blockingObject(tptr->tcbState)), tptr);
+        break;
+    case ThreadState_BlockedOnNotification:
+        tptr->tcbPriority = prio;
+        reorderNTFN(NTFN_PTR(thread_state_get_blockingObject(tptr->tcbState)), tptr);
+        break;
+    default:
+        tptr->tcbPriority = prio;
+        break;
+    }
+}
+#else
+void setPriority(tcb_t *tptr, prio_t prio)
 {
     tcbSchedDequeue(tptr);
     tptr->tcbPriority = prio;
     if (isRunnable(tptr)) {
-        SCHED_ENQUEUE(tptr);
-        rescheduleRequired();
+        if (tptr == NODE_STATE(ksCurThread)) {
+            rescheduleRequired();
+        } else {
+            possibleSwitchTo(tptr);
+        }
     }
 }
+#endif
 
 /* Note that this thread will possibly continue at the end of this kernel
  * entry. Do not queue it yet, since a queue+unqueue operation is wasteful
  * if it will be picked. Instead, it waits in the 'ksSchedulerAction' site
  * on which the scheduler will take action. */
-void
-possibleSwitchTo(tcb_t* target)
+void possibleSwitchTo(tcb_t *target)
 {
-    if (ksCurDomain != target->tcbDomain
+#ifdef CONFIG_KERNEL_MCS
+    if (target->tcbSchedContext != NULL && !thread_state_get_tcbInReleaseQueue(target->tcbState)) {
+#endif
+        if (ksCurDomain != target->tcbDomain
             SMP_COND_STATEMENT( || target->tcbAffinity != getCurrentCPUIndex())) {
-        SCHED_ENQUEUE(target);
-    } else if (NODE_STATE(ksSchedulerAction) != SchedulerAction_ResumeCurrentThread) {
-        /* Too many threads want special treatment, use regular queues. */
-        rescheduleRequired();
-        SCHED_ENQUEUE(target);
-    } else {
-        NODE_STATE(ksSchedulerAction) = target;
+            SCHED_ENQUEUE(target);
+        } else if (NODE_STATE(ksSchedulerAction) != SchedulerAction_ResumeCurrentThread) {
+            /* Too many threads want special treatment, use regular queues. */
+            rescheduleRequired();
+            SCHED_ENQUEUE(target);
+        } else {
+            NODE_STATE(ksSchedulerAction) = target;
+        }
+#ifdef CONFIG_KERNEL_MCS
     }
+#endif
+
 }
 
-void
-setThreadState(tcb_t *tptr, _thread_state_t ts)
+void setThreadState(tcb_t *tptr, _thread_state_t ts)
 {
     thread_state_ptr_set_tsType(&tptr->tcbState, ts);
     scheduleTCB(tptr);
 }
 
-void
-scheduleTCB(tcb_t *tptr)
+void scheduleTCB(tcb_t *tptr)
 {
     if (tptr == NODE_STATE(ksCurThread) &&
-            NODE_STATE(ksSchedulerAction) == SchedulerAction_ResumeCurrentThread &&
-            !isRunnable(tptr)) {
+        NODE_STATE(ksSchedulerAction) == SchedulerAction_ResumeCurrentThread &&
+        !isSchedulable(tptr)) {
         rescheduleRequired();
     }
 }
 
-void
-timerTick(void)
+#ifdef CONFIG_KERNEL_MCS
+void postpone(sched_context_t *sc)
+{
+    tcbSchedDequeue(sc->scTcb);
+    tcbReleaseEnqueue(sc->scTcb);
+    NODE_STATE_ON_CORE(ksReprogram, sc->scCore) = true;
+}
+
+void setNextInterrupt(void)
+{
+    time_t next_interrupt = NODE_STATE(ksCurTime) +
+                            refill_head(NODE_STATE(ksCurThread)->tcbSchedContext)->rAmount;
+
+    if (numDomains > 1) {
+        next_interrupt = MIN(next_interrupt, NODE_STATE(ksCurTime) + ksDomainTime);
+    }
+
+    if (NODE_STATE(ksReleaseHead) != NULL) {
+        next_interrupt = MIN(refill_head(NODE_STATE(ksReleaseHead)->tcbSchedContext)->rTime, next_interrupt);
+    }
+
+    setDeadline(next_interrupt - getTimerPrecision());
+}
+
+void chargeBudget(ticks_t consumed, bool_t canTimeoutFault)
+{
+    if (likely(NODE_STATE(ksCurSC) != NODE_STATE(ksIdleSC))) {
+        if (isRoundRobin(NODE_STATE(ksCurSC))) {
+            assert(refill_size(NODE_STATE(ksCurSC)) == MIN_REFILLS);
+            refill_head(NODE_STATE(ksCurSC))->rAmount += refill_tail(NODE_STATE(ksCurSC))->rAmount;
+            refill_tail(NODE_STATE(ksCurSC))->rAmount = 0;
+        } else {
+            refill_budget_check(consumed);
+        }
+
+        assert(refill_head(NODE_STATE(ksCurSC))->rAmount >= MIN_BUDGET);
+        NODE_STATE(ksCurSC)->scConsumed += consumed;
+    }
+    NODE_STATE(ksConsumed) = 0;
+    if (likely(isSchedulable(NODE_STATE(ksCurThread)))) {
+        assert(NODE_STATE(ksCurThread)->tcbSchedContext == NODE_STATE(ksCurSC));
+        endTimeslice(canTimeoutFault);
+        rescheduleRequired();
+        NODE_STATE(ksReprogram) = true;
+    }
+}
+
+void endTimeslice(bool_t can_timeout_fault)
+{
+    if (can_timeout_fault && !isRoundRobin(NODE_STATE(ksCurSC)) && validTimeoutHandler(NODE_STATE(ksCurThread))) {
+        current_fault = seL4_Fault_Timeout_new(NODE_STATE(ksCurSC)->scBadge);
+        handleTimeout(NODE_STATE(ksCurThread));
+    } else if (refill_ready(NODE_STATE(ksCurSC)) && refill_sufficient(NODE_STATE(ksCurSC), 0)) {
+        /* apply round robin */
+        assert(refill_sufficient(NODE_STATE(ksCurSC), 0));
+        assert(!thread_state_get_tcbQueued(NODE_STATE(ksCurThread)->tcbState));
+        SCHED_APPEND_CURRENT_TCB;
+    } else {
+        /* postpone until ready */
+        postpone(NODE_STATE(ksCurSC));
+    }
+}
+#else
+
+void timerTick(void)
 {
     if (likely(thread_state_get_tsType(NODE_STATE(ksCurThread)->tcbState) ==
                ThreadState_Running)
 #ifdef CONFIG_VTX
-            || thread_state_get_tsType(NODE_STATE(ksCurThread)->tcbState) ==
-            ThreadState_RunningVM
+        || thread_state_get_tsType(NODE_STATE(ksCurThread)->tcbState) ==
+        ThreadState_RunningVM
 #endif
        ) {
         if (NODE_STATE(ksCurThread)->tcbTimeSlice > 1) {
@@ -15456,35 +16868,573 @@ timerTick(void)
         }
     }
 
-    if (CONFIG_NUM_DOMAINS > 1) {
+    if (numDomains > 1) {
         ksDomainTime--;
         if (ksDomainTime == 0) {
             rescheduleRequired();
         }
     }
 }
+#endif
 
-void
-rescheduleRequired(void)
+void rescheduleRequired(void)
 {
     if (NODE_STATE(ksSchedulerAction) != SchedulerAction_ResumeCurrentThread
-            && NODE_STATE(ksSchedulerAction) != SchedulerAction_ChooseNewThread) {
+        && NODE_STATE(ksSchedulerAction) != SchedulerAction_ChooseNewThread
+#ifdef CONFIG_KERNEL_MCS
+        && isSchedulable(NODE_STATE(ksSchedulerAction))
+#endif
+       ) {
+#ifdef CONFIG_KERNEL_MCS
+        assert(refill_sufficient(NODE_STATE(ksSchedulerAction)->tcbSchedContext, 0));
+        assert(refill_ready(NODE_STATE(ksSchedulerAction)->tcbSchedContext));
+#endif
         SCHED_ENQUEUE(NODE_STATE(ksSchedulerAction));
     }
     NODE_STATE(ksSchedulerAction) = SchedulerAction_ChooseNewThread;
 }
 
+#ifdef CONFIG_KERNEL_MCS
+void awaken(void)
+{
+    while (unlikely(NODE_STATE(ksReleaseHead) != NULL && refill_ready(NODE_STATE(ksReleaseHead)->tcbSchedContext))) {
+        tcb_t *awakened = tcbReleaseDequeue();
+        /* the currently running thread cannot have just woken up */
+        assert(awakened != NODE_STATE(ksCurThread));
+        /* round robin threads should not be in the release queue */
+        assert(!isRoundRobin(awakened->tcbSchedContext));
+        /* threads should wake up on the correct core */
+        SMP_COND_STATEMENT(assert(awakened->tcbAffinity == getCurrentCPUIndex()));
+        /* threads HEAD refill should always be >= MIN_BUDGET */
+        assert(refill_sufficient(awakened->tcbSchedContext, 0));
+        possibleSwitchTo(awakened);
+        /* changed head of release queue -> need to reprogram */
+        NODE_STATE(ksReprogram) = true;
+    }
+}
+#endif
+#line 1 "/Users/payas/git/seL4/src/machine/capdl.c"
+/*
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ */
+
+#include <config.h>
+
+#ifdef CONFIG_DEBUG_BUILD
+
+#include <machine/capdl.h>
+#include <machine/registerset.h>
+#include <machine/timer.h>
+#include <string.h>
+#include <kernel/cspace.h>
+#ifdef CONFIG_KERNEL_MCS
+#include <kernel/sporadic.h>
+#endif
+
+#define SEEN_SZ 256
+
+/* seen list - check this array before we print cnode and vspace */
+/* TBD: This is to avoid traversing the same cnode. It should be applied to object
+ * as well since the extractor might comes across multiple caps to the same object.
+ */
+cap_t seen_list[SEEN_SZ];
+int watermark = 0;
+
+void add_to_seen(cap_t c)
+{
+    /* Won't work well if there're more than SEEN_SZ cnode */
+    if (watermark <= SEEN_SZ) {
+        seen_list[watermark] = c;
+        watermark++;
+    }
+}
+
+void reset_seen_list(void)
+{
+    memset(seen_list, 0, SEEN_SZ * sizeof(seen_list[0]));
+    watermark = 0;
+}
+
+bool_t seen(cap_t c)
+{
+    for (int i = 0; i < watermark; i++) {
+        if (same_cap(seen_list[i], c)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool_t same_cap(cap_t a, cap_t b)
+{
+    return (a.words[0] == b.words[0] && a.words[1] == b.words[1]);
+}
+
+/* Return true if strings are the same */
+static inline bool_t strings_equal(const char *str1, const char *str2)
+{
+    while (*str1 && *str2 && (*str1 == *str2)) {
+        str1++;
+        str2++;
+    }
+    return !(*(const unsigned char *)str1 - * (const unsigned char *)str2);
+}
+
+/* Return true if the tcb is for rootserver or idle thread */
+bool_t root_or_idle_tcb(tcb_t *tcb)
+{
+    return (strings_equal(TCB_PTR_DEBUG_PTR(tcb)->tcbName, "rootserver")
+            || strings_equal(TCB_PTR_DEBUG_PTR(tcb)->tcbName, "idle_thread"));
+}
 
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Print objects
+ */
+
+#ifdef CONFIG_PRINTING
+
+void obj_tcb_print_attrs(tcb_t *tcb)
+{
+    printf("(addr: 0x%lx, ip: 0x%lx, sp: 0x%lx, prio: %lu, max_prio: %lu",
+           (long unsigned int)tcb->tcbIPCBuffer,
+           (long unsigned int)getRestartPC(tcb),
+           (long unsigned int)get_tcb_sp(tcb),
+           (long unsigned int)tcb->tcbPriority,
+           (long unsigned int)tcb->tcbMCP);
+
+#ifdef ENABLE_SMP_SUPPORT
+    printf(", affinity: %lu", (long unsigned int)tcb->tcbAffinity);
+#endif /* ENABLE_SMP_SUPPORT */
+
+    /* init */
+
+#ifdef CONFIG_KERNEL_MCS
+    cap_t ep_cap = TCB_PTR_CTE_PTR(tcb, tcbFaultHandler)->cap;
+    if (cap_get_capType(ep_cap) != cap_null_cap) {
+        printf(", fault_ep: %p", EP_PTR(cap_endpoint_cap_get_capEPPtr(ep_cap)));
+    }
+#endif
+
+    printf(", dom: %ld)\n", tcb->tcbDomain);
+}
+
+#ifdef CONFIG_KERNEL_MCS
+
+static inline ticks_t sc_get_budget(sched_context_t *sc)
+{
+    ticks_t sum = refill_head(sc)->rAmount;
+    word_t current = sc->scRefillHead;
+
+    while (current != sc->scRefillTail) {
+        current = ((current == sc->scRefillMax - 1u) ? (0) : current + 1u);
+        sum += refill_index(sc, current)->rAmount;
+    }
+
+    return sum;
+}
+
+void obj_sc_print_attrs(cap_t sc_cap)
+{
+    sched_context_t *sc = SC_PTR(cap_sched_context_cap_get_capSCPtr(sc_cap));
+    printf("(period: %lu, budget: %lu, %lu bits)\n",
+           (long unsigned int)ticksToUs(sc->scPeriod),
+           (long unsigned int)ticksToUs(sc_get_budget(sc)),
+           (word_t)cap_sched_context_cap_get_capSCSizeBits(sc_cap)
+          );
+}
+#endif /* CONFIG_KERNEL_MCS */
+
+void obj_ut_print_attrs(cte_t *slot, tcb_t *tcb)
+{
+    /* might have two untypeds with the same address but different size */
+    printf("%p_%lu_untyped = ut (%lu bits, paddr: %p) {",
+           (void *)cap_untyped_cap_get_capPtr(slot->cap),
+           (long unsigned int)cap_untyped_cap_get_capBlockSize(slot->cap),
+           (long unsigned int)cap_untyped_cap_get_capBlockSize(slot->cap),
+           WORD_PTR(cap_untyped_cap_get_capPtr(slot->cap)));
+
+    /* there is no need to check for a NullCap as NullCaps are
+    always accompanied by null mdb pointers */
+    for (cte_t *nextPtr = CTE_PTR(mdb_node_get_mdbNext(slot->cteMDBNode));
+         nextPtr && isMDBParentOf(slot, nextPtr);
+         nextPtr = CTE_PTR(mdb_node_get_mdbNext(slot->cteMDBNode))) {
+        if (!sameRegionAs(slot->cap, nextPtr->cap)) {
+            /* TBD:
+             * - this will print out the attributes of the cap, which it shouldn't
+             *
+             * - might be a pathological case where an untyped has a child cap that
+             *   isn't reachable from any of the non root threads. This would result
+             *   in an object being mentioned but never properly defined
+             */
+            print_cap(nextPtr->cap);
+        }
+    }
+    printf("}\n");
+}
+
+void obj_cnode_print_attrs(cap_t cnode)
+{
+    printf("(%lu bits)\n", (long unsigned int)cap_cnode_cap_get_capCNodeRadix(cnode));
+}
+
+void obj_tcb_print_cnodes(cap_t cnode, tcb_t *tcb)
+{
+    if (seen(cnode)) {
+        return;
+    }
+    add_to_seen(cnode);
+    printf("%p_cnode = cnode ", (void *)cap_cnode_cap_get_capCNodePtr(cnode));
+    obj_cnode_print_attrs(cnode);
+    word_t radix = cap_cnode_cap_get_capCNodeRadix(cnode);
+
+    for (uint32_t i = 0; i < (1 << radix); i++) {
+        lookupCapAndSlot_ret_t c = lookupCapAndSlot(tcb, i);
+        if (cap_get_capType(c.cap) == cap_untyped_cap) {
+            /* we need `cte_t *` to print out the slots of an untyped object */
+            obj_ut_print_attrs(c.slot, tcb);
+
+        } else if (cap_get_capType(c.cap) == cap_cnode_cap) {
+            /* TBD: deal with nested cnodes */
+
+        } else if (cap_get_capType(c.cap) != cap_null_cap) {
+            print_object(c.cap);
+        }
+    }
+}
+
+/*
+ * Caps
+ */
+
+void cap_cnode_print_attrs(cap_t cnode)
+{
+    printf("(guard: %lu, guard_size: %lu)\n",
+           (long unsigned int)cap_cnode_cap_get_capCNodeGuard(cnode),
+           (long unsigned int)cap_cnode_cap_get_capCNodeGuardSize(cnode));
+}
+
+void cap_ep_print_attrs(cap_t ep)
+{
+    printf("(");
+    cap_endpoint_cap_get_capCanReceive(ep) ? putchar('R') : 0;
+    cap_endpoint_cap_get_capCanSend(ep) ? putchar('W') : 0;
+    cap_endpoint_cap_get_capCanGrant(ep) ? putchar('G') : 0;
+    cap_endpoint_cap_get_capCanGrantReply(ep) ? putchar('P') : 0;
+    long unsigned int badge = cap_endpoint_cap_get_capEPBadge(ep);
+    badge ? printf(", badge: %lu)\n", badge) : printf(")\n");
+}
+
+void cap_ntfn_print_attrs(cap_t ntfn)
+{
+    printf("(");
+    cap_notification_cap_get_capNtfnCanReceive(ntfn) ? putchar('R') : 0;
+    cap_notification_cap_get_capNtfnCanSend(ntfn) ? putchar('W') : 0;
+    long unsigned int badge = cap_notification_cap_get_capNtfnBadge(ntfn);
+    badge ? printf(", badge: %lu)\n", badge) : printf(")\n");
+}
+
+/*
+ * print object slots
+ */
+
+void obj_tcb_print_slots(tcb_t *tcb)
+{
+    printf("%p_tcb {\n", tcb);
+
+    /* CSpace root */
+    if (cap_get_capType(TCB_PTR_CTE_PTR(tcb, tcbCTable)->cap) != cap_null_cap) {
+        printf("cspace: %p_cnode ",
+               (void *)cap_cnode_cap_get_capCNodePtr(TCB_PTR_CTE_PTR(tcb, tcbCTable)->cap));
+        cap_cnode_print_attrs(TCB_PTR_CTE_PTR(tcb, tcbCTable)->cap);
+    }
+
+    /* VSpace root */
+    if (cap_get_capType(TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap) != cap_null_cap) {
+        printf("vspace: %p_pd\n",
+               cap_vtable_cap_get_vspace_root_fp(TCB_PTR_CTE_PTR(tcb, tcbVTable)->cap));
+
+    }
+
+    /* IPC buffer cap slot */
+    if (cap_get_capType(TCB_PTR_CTE_PTR(tcb, tcbBuffer)->cap) != cap_null_cap) {
+        /* TBD: print out the bound vcpu */
+        print_ipc_buffer_slot(tcb);
+    }
+
+#ifdef CONFIG_KERNEL_MCS
+
+    /* Fault endpoint slot */
+    if (cap_get_capType(TCB_PTR_CTE_PTR(tcb, tcbFaultHandler)->cap) != cap_null_cap) {
+        printf("fault_ep_slot: %p_ep ",
+               (void *)cap_endpoint_cap_get_capEPPtr(TCB_PTR_CTE_PTR(tcb, tcbFaultHandler)->cap));
+        cap_ep_print_attrs(TCB_PTR_CTE_PTR(tcb, tcbFaultHandler)->cap);
+    }
+
+    /* sc */
+    if (tcb->tcbSchedContext) {
+        printf("sc_slot: %p_sc\n", tcb->tcbSchedContext);
+    }
+
+    /* Timeout endpoint slot */
+    if (cap_get_capType(TCB_PTR_CTE_PTR(tcb, tcbTimeoutHandler)->cap) != cap_null_cap) {
+        printf("temp_fault_ep_slot: %p_ep ",
+               (void *)cap_endpoint_cap_get_capEPPtr(TCB_PTR_CTE_PTR(tcb, tcbTimeoutHandler)->cap));
+        cap_ep_print_attrs(TCB_PTR_CTE_PTR(tcb, tcbTimeoutHandler)->cap);
+    }
+
+# else
+    /* Reply cap slot */
+    if (cap_get_capType(TCB_PTR_CTE_PTR(tcb, tcbReply)->cap) != cap_null_cap) {
+        printf("reply_slot: %p_reply\n",
+               (void *)cap_reply_cap_get_capTCBPtr(TCB_PTR_CTE_PTR(tcb, tcbReply)->cap));
+    }
+
+    /* TCB of most recent IPC sender */
+    if (cap_get_capType(TCB_PTR_CTE_PTR(tcb, tcbCaller)->cap) != cap_null_cap) {
+        tcb_t *caller = TCB_PTR(cap_thread_cap_get_capTCBPtr(TCB_PTR_CTE_PTR(tcb, tcbCaller)->cap));
+        printf("caller_slot: %p_tcb\n", caller);
+    }
+#endif /* CONFIG_KERNEL_MCS */
+    printf("}\n");
+}
+
+/* TBD: deal with nested cnodes */
+void obj_cnode_print_slots(tcb_t *tcb)
+{
+    cap_t root = TCB_PTR_CTE_PTR(tcb, tcbCTable)->cap;
+    if (cap_get_capType(root) != cap_cnode_cap) {
+        return;
+    }
+
+    word_t radix = cap_cnode_cap_get_capCNodeRadix(root);
+    if (seen(root)) {
+        return;
+    }
+    add_to_seen(root);
+
+    printf("%p_cnode {\n", (void *)cap_cnode_cap_get_capCNodePtr(root));
+
+    for (uint32_t i = 0; i < (1 << radix); i++) {
+        lookupCapAndSlot_ret_t c = lookupCapAndSlot(tcb, i);
+        if (cap_get_capType(c.cap) != cap_null_cap) {
+            printf("0x%x: ", i);
+            print_cap(c.cap);
+        }
+    }
+    printf("}\n");
+
+    for (uint32_t i = 0; i < (1 << radix); i++) {
+        lookupCapAndSlot_ret_t c = lookupCapAndSlot(tcb, i);
+        if (cap_get_capType(c.cap) == cap_irq_handler_cap) {
+            /* TBD: should instead print it from IRQNode */
+            obj_irq_print_slots(c.cap);
+        }
+    }
+}
+
+void obj_irq_print_maps(void)
+{
+    printf("irq maps {\n");
+
+    for (seL4_Word target = 0; target < CONFIG_MAX_NUM_NODES; target++) {
+        for (unsigned i = 0; i <= maxIRQ; i++) {
+            irq_t irq = CORE_IRQ_TO_IRQT(target, i);
+            if (isIRQActive(irq)) {
+                cap_t cap = intStateIRQNode[IRQT_TO_IDX(irq)].cap;
+                if (cap_get_capType(cap) != cap_null_cap) {
+                    printf("%d: 0x%lx_%lu_irq\n",
+                           i,
+#if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_ARCH_ARM)
+                           (long unsigned int)irq.irq,
+#else
+                           (long unsigned int)irq,
+#endif
+                           (long unsigned int)target);
+                }
+            }
+        }
+    }
+    printf("}\n");
+}
+
+void obj_irq_print_slots(cap_t irq_cap)
+{
+    irq_t irq = IDX_TO_IRQT(cap_irq_handler_cap_get_capIRQ(irq_cap));
+    if (isIRQActive(irq)) {
+        printf("0x%lx_%lu_irq {\n",
+#if defined(ENABLE_SMP_SUPPORT) && defined(CONFIG_ARCH_ARM)
+               (long unsigned int)irq.irq,
+#else
+               (long unsigned int)irq,
+#endif
+               (long unsigned int)IRQT_TO_CORE(irq));
+        cap_t ntfn_cap = intStateIRQNode[IRQT_TO_IDX(irq)].cap;
+        if (cap_get_capType(ntfn_cap) != cap_null_cap) {
+            printf("0x0: ");
+            print_cap(ntfn_cap);
+        }
+        printf("}\n");
+    }
+}
+
+void print_objects(void)
+{
+    for (tcb_t *curr = NODE_STATE(ksDebugTCBs); curr != NULL; curr = TCB_PTR_DEBUG_PTR(curr)->tcbDebugNext) {
+        if (root_or_idle_tcb(curr)) {
+            continue;
+        }
+        /* print the contains of the tcb's vtable as objects */
+        obj_tcb_print_vtable(curr);
+    }
+
+    for (tcb_t *curr = NODE_STATE(ksDebugTCBs); curr != NULL; curr = TCB_PTR_DEBUG_PTR(curr)->tcbDebugNext) {
+        if (root_or_idle_tcb(curr)) {
+            continue;
+        }
+
+        /* print the tcb as objects */
+        printf("%p_tcb = tcb ", curr);
+        obj_tcb_print_attrs(curr);
+
+        /* print the contains of the tcb's ctable as objects */
+        if (cap_get_capType(TCB_PTR_CTE_PTR(curr, tcbCTable)->cap) == cap_cnode_cap) {
+            obj_tcb_print_cnodes(TCB_PTR_CTE_PTR(curr, tcbCTable)->cap, curr);
+        }
+    }
+}
+
+void print_caps(void)
+{
+    for (tcb_t *curr = NODE_STATE(ksDebugTCBs); curr != NULL; curr = TCB_PTR_DEBUG_PTR(curr)->tcbDebugNext) {
+        if (root_or_idle_tcb(curr)) {
+            continue;
+        }
+        obj_cnode_print_slots(curr);
+        obj_vtable_print_slots(curr);
+        obj_tcb_print_slots(curr);
+    }
+}
+
+void print_cap(cap_t cap)
+{
+    switch (cap_get_capType(cap)) {
+    case cap_endpoint_cap: {
+        printf("%p_ep ",
+               (void *)cap_endpoint_cap_get_capEPPtr(cap));
+        cap_ep_print_attrs(cap);
+        break;
+    }
+    case cap_notification_cap: {
+        printf("%p_notification ",
+               (void *)cap_notification_cap_get_capNtfnPtr(cap));
+        cap_ntfn_print_attrs(cap);
+        break;
+    }
+    case cap_untyped_cap: {
+        printf("%p_untyped\n",
+               (void *)cap_untyped_cap_get_capPtr(cap));
+        break;
+    }
+    case cap_thread_cap: {
+        printf("%p_tcb\n",
+               (void *)cap_thread_cap_get_capTCBPtr(cap));
+        break;
+    }
+    case cap_cnode_cap: {
+        printf("%p_cnode ",
+               (void *)cap_cnode_cap_get_capCNodePtr(cap));
+        cap_cnode_print_attrs(cap);
+        break;
+    }
+#ifdef CONFIG_KERNEL_MCS
+    case cap_reply_cap: {
+        printf("%p_reply\n",
+               (void *)cap_reply_cap_get_capReplyPtr(cap));
+        break;
+    }
+    case cap_sched_context_cap: {
+        printf("%p_sc\n",
+               (void *)cap_sched_context_cap_get_capSCPtr(cap));
+        break;
+    }
+    case cap_sched_control_cap: {
+        printf("%lu_sched_control\n",
+               (long unsigned int)cap_sched_control_cap_get_core(cap));
+        break;
+    }
+#endif
+    case cap_irq_control_cap: {
+        printf("irq_control\n"); /* only one in the system */
+        break;
+    }
+    case cap_irq_handler_cap: {
+        printf("%p_%lu_irq\n",
+               (void *)cap_irq_handler_cap_get_capIRQ(cap),
+               (long unsigned int)IRQT_TO_CORE(IDX_TO_IRQT(cap_irq_handler_cap_get_capIRQ(cap))));
+        break;
+    }
+    default: {
+        print_cap_arch(cap);
+        break;
+    }
+    }
+}
+
+void print_object(cap_t cap)
+{
+    switch (cap_get_capType(cap)) {
+    case cap_endpoint_cap: {
+        printf("%p_ep = ep\n",
+               (void *)cap_endpoint_cap_get_capEPPtr(cap));
+        break;
+    }
+    case cap_notification_cap: {
+        printf("%p_notification = notification\n",
+               (void *)cap_notification_cap_get_capNtfnPtr(cap));
+        break;
+    }
+    case cap_thread_cap: {
+        /* this object has already got handle by `print_objects` */
+        break;
+    }
+    case cap_cnode_cap: {
+        assert(!"should not happend");
+    }
+#ifdef CONFIG_KERNEL_MCS
+    case cap_reply_cap: {
+        printf("%p_reply = rtreply\n",
+               (void *)cap_reply_cap_get_capReplyPtr(cap));
+        break;
+    }
+    case cap_sched_context_cap: {
+        printf("%p_sc = sc ",
+               (void *)cap_sched_context_cap_get_capSCPtr(cap));
+        obj_sc_print_attrs(cap);
+        break;
+    }
+#endif
+    case cap_irq_handler_cap: {
+        printf("%p_%lu_irq = irq\n",
+               (void *)cap_irq_handler_cap_get_capIRQ(cap),
+               (long unsigned int)IRQT_TO_CORE(IDX_TO_IRQT(cap_irq_handler_cap_get_capIRQ(cap))));
+        break;
+    }
+    default:
+        print_object_arch(cap);
+        break;
+    }
+}
+
+#endif /* CONFIG_PRINTING */
+
+#endif /* CONFIG_DEBUG_BUILD */
+#line 1 "/Users/payas/git/seL4/src/machine/fpu.c"
+/*
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -15527,8 +17477,7 @@ void switchFpuOwner(user_fpu_state_t *new_owner, word_t cpu)
  * This CPU exception is thrown when userspace attempts to use the FPU while
  * it is disabled. We need to save the current state of the FPU, and hand
  * it over. */
-exception_t
-handleFPUFault(void)
+exception_t handleFPUFault(void)
 {
     /* If we have already given the FPU to the user, we should not reach here.
      * This should only be able to occur on CPUs without an FPU at all, which
@@ -15551,15 +17500,17 @@ void fpuThreadDelete(tcb_t *thread)
     }
 }
 #endif /* CONFIG_HAVE_FPU */
-
+#line 1 "/Users/payas/git/seL4/src/machine/io.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
+ * SPDX-License-Identifier: GPL-2.0-only
  *
- * @TAG(GD_GPL)
+ * Portions derived from musl:
+ *
+ * Copyright (c) 2005-2020 Rich Felker, et al.
+ *
+ * SPDX-License-Identifier: MIT
  */
 
 #include <config.h>
@@ -15568,337 +17519,665 @@ void fpuThreadDelete(tcb_t *thread)
 #ifdef CONFIG_PRINTING
 
 #include <stdarg.h>
+#include <stdint.h>
 
-void
-putchar(char c)
+/*
+ *------------------------------------------------------------------------------
+ * printf() core output channel management
+ *------------------------------------------------------------------------------
+ */
+
+typedef struct _out_wrap_t  out_wrap_t;
+
+/* handler defining how/where to actually output a buffer */
+typedef void (*out_write_fn)(out_wrap_t *out, const char *buf, word_t len);
+
+struct _out_wrap_t {
+    const out_write_fn write;
+    char *const buf;
+    const word_t maxlen;
+    word_t used;
+};
+
+/* printf_core() and its helpers call this to actually output something. The
+ * parameter 'out_wrap' cam be NULL, e.g. when printf_core() is just caller to
+ * validate the format string. In this case we do nothing.
+ */
+static void out(out_wrap_t *out_wrap, const char *buf, word_t len)
 {
-    putConsoleChar(c);
-    if (c == '\n') {
-        putConsoleChar('\r');
+    if (out_wrap) {
+        out_wrap->write(out_wrap, buf, len);
     }
 }
 
-static unsigned int
-print_spaces(int n)
+/* An out_write_fn implementation to print the characters via putchar(). It is
+ * guaranteed here that 'out' is not NULL. The current implementation also never
+ * passes NULL for 'buf'. */
+static void do_output_to_putchar(
+    UNUSED out_wrap_t *out,
+    const char *buf,
+    word_t len)
 {
-    for (int i = 0; i < n; i++) {
-        kernel_putchar(' ');
-    }
-
-    return n;
-}
-
-static unsigned int
-print_string(const char *s)
-{
-    unsigned int n;
-
-    for (n = 0; *s; s++, n++) {
-        kernel_putchar(*s);
-    }
-
-    return n;
-}
-
-static unsigned long
-xdiv(unsigned long x, unsigned int denom)
-{
-    switch (denom) {
-    case 16:
-        return x / 16;
-    case 10:
-        return x / 10;
-    default:
-        return 0;
-    }
-}
-
-static unsigned long
-xmod(unsigned long x, unsigned int denom)
-{
-    switch (denom) {
-    case 16:
-        return x % 16;
-    case 10:
-        return x % 10;
-    default:
-        return 0;
-    }
-}
-
-word_t
-print_unsigned_long(unsigned long x, word_t ui_base)
-{
-    char out[sizeof(unsigned long) * 2 + 3];
-    word_t i, j;
-    unsigned int d;
-
-    /*
-     * Only base 10 and 16 supported for now. We want to avoid invoking the
-     * compiler's support libraries through doing arbitrary divisions.
-     */
-    if (ui_base != 10 && ui_base != 16) {
-        return 0;
-    }
-
-    if (x == 0) {
-        kernel_putchar('0');
-        return 1;
-    }
-
-    for (i = 0; x; x = xdiv(x, ui_base), i++) {
-        d = xmod(x, ui_base);
-
-        if (d >= 10) {
-            out[i] = 'a' + d - 10;
-        } else {
-            out[i] = '0' + d;
+    if (buf) {
+        while (len-- > 0) {
+            putchar(*buf++);
         }
     }
-
-    for (j = i; j > 0; j--) {
-        kernel_putchar(out[j - 1]);
-    }
-
-    return i;
 }
 
-/* The print_unsigned_long_long function assumes that an unsinged int
-   is half the size of an unsigned long long */
-compile_assert(print_unsigned_long_long_sizes, sizeof(unsigned int) * 2 == sizeof(unsigned long long))
-
-static unsigned int
-print_unsigned_long_long(unsigned long long x, unsigned int ui_base)
+/* An out_write_fn implementation to copy the buffer into the out buffer. It is
+ * guaranteed here that 'out' is not NULL. The current implementation also never
+ * passes NULL for 'buf'. */
+static void do_output_to_buffer(
+    out_wrap_t *out,
+    const char *buf,
+    word_t len)
 {
-    unsigned int upper, lower;
-    unsigned int n = 0;
-    unsigned int mask = 0xF0000000u;
-    unsigned int shifts = 0;
-
-    /* only implemented for hex, decimal is harder without 64 bit division */
-    if (ui_base != 16) {
-        return 0;
-    }
-
-    /* we can't do 64 bit division so break it up into two hex numbers */
-    upper = (unsigned int) (x >> 32llu);
-    lower = (unsigned int) x & 0xffffffff;
-
-    /* print first 32 bits if they exist */
-    if (upper > 0) {
-        n += print_unsigned_long(upper, ui_base);
-        /* print leading 0s */
-        while (!(mask & lower)) {
-            kernel_putchar('0');
-            n++;
-            mask = mask >> 4;
-            shifts++;
-            if (shifts == 8) {
-                break;
-            }
+    /* It's guaranteed here that 'out' is not NULL. The current implementation
+     * also never passes NULL for 'buf'. */
+    if (buf && (out->used < out->maxlen)) {
+        /* there is still space in the buffer*/
+        word_t free = out->maxlen - out->used;
+        if (len > free) {
+            len = free;
         }
+        memcpy(&out->buf[out->used], buf, len);
+        out->used += len;
     }
-    /* print last 32 bits */
-    n += print_unsigned_long(lower, ui_base);
-
-    return n;
 }
 
-static inline bool_t
-isdigit(char c)
+/*
+ *------------------------------------------------------------------------------
+ * printf() core implementation
+ *------------------------------------------------------------------------------
+ */
+
+static inline bool_t isdigit(char c)
 {
     return c >= '0' &&
            c <= '9';
 }
 
-static inline int
-atoi(char c)
+/* Convenient bit representation for modifier flags, which all fall within 31
+ * codepoints of the space character.
+ */
+#define MASK_TYPE(a) (1U<<( a -' '))
+
+#define ALT_FORM     (1U<<('#'-' '))
+#define ZERO_PAD     (1U<<('0'-' '))
+#define LEFT_ADJ     (1U<<('-'-' '))
+#define PAD_POS      (1U<<(' '-' '))
+#define MARK_POS     (1U<<('+'-' '))
+#define GROUPED      (1U<<('\''-' '))
+
+#define FLAGMASK (ALT_FORM|ZERO_PAD|LEFT_ADJ|PAD_POS|MARK_POS|GROUPED)
+
+/* State machine to accept length modifiers + conversion specifiers.
+ * Result is 0 on failure, or an argument type to pop on success.
+ */
+
+enum {
+    BARE, LPRE, LLPRE, HPRE, HHPRE, BIGLPRE,
+    ZTPRE, JPRE,
+    STOP,
+    PTR, INT, UINT, ULLONG,
+    LONG, ULONG,
+    SHORT, USHORT, CHAR, UCHAR,
+    WORDT, LLONG,
+#define IMAX LLONG
+#define UMAX ULLONG
+#define PDIFF LONG
+#define UIPTR ULONG
+    NOARG,
+    MAXSTATE
+};
+
+#define S(x) [(x)-'A']
+
+static const unsigned char states[]['z' - 'A' + 1] = {
+    { /* 0: bare types */
+        S('d') = INT, S('i') = INT,
+        S('o') = UINT, S('u') = UINT, S('x') = UINT, S('X') = UINT,
+        S('c') = CHAR,
+        S('s') = PTR, S('p') = UIPTR, S('n') = PTR,
+        S('l') = LPRE, S('h') = HPRE,
+        S('z') = ZTPRE, S('j') = JPRE, S('t') = ZTPRE,
+    }, { /* 1: l-prefixed */
+        S('d') = LONG, S('i') = LONG,
+        S('o') = ULONG, S('u') = ULONG, S('x') = ULONG, S('X') = ULONG,
+        S('n') = PTR,
+        S('l') = LLPRE,
+    }, { /* 2: ll-prefixed */
+        S('d') = LLONG, S('i') = LLONG,
+        S('o') = ULLONG, S('u') = ULLONG,
+        S('x') = ULLONG, S('X') = ULLONG,
+        S('n') = PTR,
+    }, { /* 3: h-prefixed */
+        S('d') = SHORT, S('i') = SHORT,
+        S('o') = USHORT, S('u') = USHORT,
+        S('x') = USHORT, S('X') = USHORT,
+        S('n') = PTR,
+        S('h') = HHPRE,
+    }, { /* 4: hh-prefixed */
+        S('d') = CHAR, S('i') = CHAR,
+        S('o') = UCHAR, S('u') = UCHAR,
+        S('x') = UCHAR, S('X') = UCHAR,
+        S('n') = PTR,
+    }, { /* 5: L-prefixed not supported */
+    }, { /* 6: z- or t-prefixed (assumed to be same size) */
+        S('d') = PDIFF, S('i') = PDIFF,
+        S('o') = WORDT, S('u') = WORDT,
+        S('x') = WORDT, S('X') = WORDT,
+        S('n') = PTR,
+    }, { /* 7: j-prefixed */
+        S('d') = IMAX, S('i') = IMAX,
+        S('o') = UMAX, S('u') = UMAX,
+        S('x') = UMAX, S('X') = UMAX,
+        S('n') = PTR,
+    }
+};
+
+#define OOB(x) ((unsigned)(x)-'A' > 'z'-'A')
+#define DIGIT(c) (c - '0')
+
+union arg {
+    uintmax_t i;
+    long double f;
+    void *p;
+};
+
+static void pop_arg(union arg *arg, int type, va_list *ap)
 {
-    return c - '0';
+    switch (type) {
+    case PTR:
+        arg->p = va_arg(*ap, void *);
+        break;
+    case INT:
+        arg->i = va_arg(*ap, int);
+        break;
+    case UINT:
+        arg->i = va_arg(*ap, unsigned int);
+        break;
+    case LONG:
+        arg->i = va_arg(*ap, long);
+        break;
+    case ULONG:
+        arg->i = va_arg(*ap, unsigned long);
+        break;
+    case LLONG:
+        arg->i = va_arg(*ap, long long);
+        break;
+    case ULLONG:
+        arg->i = va_arg(*ap, unsigned long long);
+        break;
+    case SHORT:
+        arg->i = (short)va_arg(*ap, int);
+        break;
+    case USHORT:
+        arg->i = (unsigned short)va_arg(*ap, int);
+        break;
+    case CHAR:
+        arg->i = (signed char)va_arg(*ap, int);
+        break;
+    case UCHAR:
+        arg->i = (unsigned char)va_arg(*ap, int);
+        break;
+    case WORDT:
+        arg->i = va_arg(*ap, word_t);
+    }
 }
 
-static int
-vprintf(const char *format, va_list ap)
+
+static void pad(out_wrap_t *f, char c, int w, int l, int fl)
 {
-    unsigned int n;
-    unsigned int formatting;
-    int nspaces = 0;
-
-    if (!format) {
-        return 0;
+    char pad[32]; /* good enough for what the kernel prints */
+    if (fl & (LEFT_ADJ | ZERO_PAD) || l >= w) {
+        return;
     }
+    l = w - l;
+    memset(pad, c, l > sizeof(pad) ? sizeof(pad) : l);
+    for (; l >= sizeof(pad); l -= sizeof(pad)) {
+        out(f, pad, sizeof(pad));
+    }
+    out(f, pad, l);
+}
 
-    n = 0;
-    formatting = 0;
-    while (*format) {
-        if (formatting) {
-            while (isdigit(*format)) {
-                nspaces = nspaces * 10 + atoi(*format);
-                format++;
-                if (format == NULL) {
-                    break;
-                }
-            }
-            switch (*format) {
-            case '%':
-                kernel_putchar('%');
-                n++;
-                format++;
-                break;
+static const char xdigits[16] = {
+    "0123456789ABCDEF"
+};
 
-            case 'd': {
-                int x = va_arg(ap, int);
+static char *fmt_x(uintmax_t x, char *s, int lower)
+{
+    for (; x; x >>= 4) {
+        *--s = xdigits[(x & 15)] | lower;
+    }
+    return s;
+}
 
-                if (x < 0) {
-                    kernel_putchar('-');
-                    n++;
-                    x = -x;
-                }
+static char *fmt_o(uintmax_t x, char *s)
+{
+    for (; x; x >>= 3) {
+        *--s = '0' + (x & 7);
+    }
+    return s;
+}
 
-                n += print_unsigned_long(x, 10);
-                format++;
-                break;
-            }
+static char *fmt_u(uintmax_t x, char *s)
+{
+    while (0 != x) {
+#if defined(CONFIG_ARCH_AARCH32) || defined(CONFIG_ARCH_RISCV32) || defined(CONFIG_ARCH_IA32)
+        /* On 32-bit systems, dividing a 64-bit number by 10 makes the compiler
+         * call a helper function from a compiler runtime library. The actual
+         * function differs, currently for x86 it's __udivdi3(), for ARM its
+         * __aeabi_uldivmod() and for RISC-V it's __umoddi3(). The kernel is not
+         * supposed to have dependencies on a compiler library, so the algorithm
+         * below (taken from Hacker's Delight) is used to divide by 10 with only
+         * basic operation and avoiding even multiplication.
+         */
+        uintmax_t q = (x >> 1) + (x >> 2); /* q = x/2 + x/4 = 3x/4 */
+        q += (q >> 4); /* q += (3x/4)/16 = 51x/2^6 */
+        q += (q >> 8); /* q += (51x/2^6)/2^8 = 13107x/2^14 */
+        q += (q >> 16); /* q += (13107x/2^14)/2^16 = 858993458x/2^30 */
+        q += (q >> 32); /* q += (858993458x/2^30)/2^32 = .../2^62 */
+        q >>= 3; /* q is roughly 0.8x, so q/8 is roughly x/10 */
+        unsigned int rem = x - (((q << 2) + q) << 1); // rem = x - 10q */
+        if (rem > 9) { /* handle rounding issues */
+            q += 1;
+            rem = x - (((q << 2) + q) << 1); /* recalculate reminder */
+            assert(rem <= 9); /* there must be no rounding error now */
+        }
+#else
+        uintmax_t q = x / 10;
+        unsigned int rem = x % 10;
+#endif
+        *--s = '0' + rem;
+        x = q;
+    }
+    return s;
+}
 
-            case 'u':
-                n += print_unsigned_long(va_arg(ap, unsigned int), 10);
-                format++;
-                break;
+/* Maximum buffer size taken to ensure correct adaptation. However, it could be
+ * reduced/removed if we could measure the buf length under all code paths
+ */
+#define LDBL_MANT_DIG 113
 
-            case 'x':
-                n += print_unsigned_long(va_arg(ap, unsigned int), 16);
-                format++;
-                break;
+#define NL_ARGMAX 9
 
-            case 'p': {
-                unsigned long p = va_arg(ap, unsigned long);
-                if (p == 0) {
-                    n += print_string("(nil)");
-                } else {
-                    n += print_string("0x");
-                    n += print_unsigned_long(p, 16);
-                }
-                format++;
-                break;
-            }
-
-            case 's':
-                n += print_string(va_arg(ap, char *));
-                format++;
-                break;
-
-            case 'l':
-                format++;
-                switch (*format) {
-                case 'd': {
-                    long x = va_arg(ap, long);
-
-                    if (x < 0) {
-                        kernel_putchar('-');
-                        n++;
-                        x = -x;
-                    }
-
-                    n += print_unsigned_long((unsigned long)x, 10);
-                    format++;
-                }
-                break;
-                case 'l':
-                    if (*(format + 1) == 'x') {
-                        n += print_unsigned_long_long(va_arg(ap, unsigned long long), 16);
-                    }
-                    format += 2;
-                    break;
-                case 'u':
-                    n += print_unsigned_long(va_arg(ap, unsigned long), 10);
-                    format++;
-                    break;
-                case 'x':
-                    n += print_unsigned_long(va_arg(ap, unsigned long), 16);
-                    format++;
-                    break;
-
-                default:
-                    /* format not supported */
-                    return -1;
-                }
-                break;
-            default:
-                /* format not supported */
-                return -1;
-            }
-
-            n += print_spaces(nspaces - n);
-            nspaces = 0;
-            formatting = 0;
+static int getint(char **s)
+{
+    int i;
+    for (i = 0; isdigit(**s); (*s)++) {
+        if (i > INTMAX_MAX / 10U || DIGIT(**s) > INTMAX_MAX - 10 * i) {
+            i = -1;
         } else {
-            switch (*format) {
-            case '%':
-                formatting = 1;
-                format++;
-                break;
-
-            default:
-                kernel_putchar(*format);
-                n++;
-                format++;
-                break;
-            }
+            i = 10 * i + DIGIT(**s);
         }
     }
-
-    return n;
-}
-
-word_t puts(const char *s)
-{
-    for (; *s; s++) {
-        kernel_putchar(*s);
-    }
-    kernel_putchar('\n');
-    return 0;
-}
-
-word_t
-kprintf(const char *format, ...)
-{
-    va_list args;
-    word_t i;
-
-    va_start(args, format);
-    i = vprintf(format, args);
-    va_end(args);
     return i;
 }
 
-#endif /* CONFIG_PRINTING */
+static int printf_core(out_wrap_t *f, const char *fmt, va_list *ap, union arg *nl_arg, int *nl_type)
+{
+    char *a, *z, *s = (char *)fmt;
+    unsigned l10n = 0, fl;
+    int w, p, xp;
+    union arg arg;
+    int argpos;
+    unsigned st, ps;
+    int cnt = 0, l = 0;
+    char buf[sizeof(uintmax_t) * 3 + 3 + LDBL_MANT_DIG / 4];
+    const char *prefix;
+    int t, pl;
+
+    for (;;) {
+        if (l > INTMAX_MAX - cnt) {
+            /* This error is only specified for snprintf, for other function
+             * from the printf() family the behavior is unspecified. Stopping
+             * immediately here also seems sane, otherwise %n could produce
+             * wrong results.
+             */
+            return -1; /* overflow */
+        }
+
+        /* Update output count, end loop when fmt is exhausted */
+        cnt += l;
+        if (!*s) {
+            break;
+        }
+
+        /* Handle literal text and %% format specifiers */
+        for (a = s; *s && *s != '%'; s++);
+        for (z = s; s[0] == '%' && s[1] == '%'; z++, s += 2);
+        if (z - a > INTMAX_MAX - cnt) {
+            return -1; /* overflow */
+        }
+        l = z - a;
+        out(f, a, l);
+        if (l) {
+            continue;
+        }
+
+        if (isdigit(s[1]) && s[2] == '$') {
+            l10n = 1;
+            argpos = DIGIT(s[1]);
+            s += 3;
+        } else {
+            argpos = -1;
+            s++;
+        }
+
+        /* Read modifier flags */
+        for (fl = 0; (unsigned)*s - ' ' < 32 && (FLAGMASK & MASK_TYPE(*s)); s++) {
+            fl |= MASK_TYPE(*s);
+        }
+
+        /* Read field width */
+        if (*s == '*') {
+            if (isdigit(s[1]) && s[2] == '$') {
+                l10n = 1;
+                nl_type[DIGIT(s[1])] = INT;
+                w = nl_arg[DIGIT(s[1])].i;
+                s += 3;
+            } else if (!l10n) {
+                w = f ? va_arg(*ap, int) : 0;
+                s++;
+            } else {
+                return -1; /* invalid */
+            }
+            if (w < 0) {
+                fl |= LEFT_ADJ;
+                w = -w;
+            }
+        } else if ((w = getint(&s)) < 0) {
+            return -1; /* overflow */
+        }
+
+        /* Read precision */
+        if (*s == '.' && s[1] == '*') {
+            if (isdigit(s[2]) && s[3] == '$') {
+                nl_type[DIGIT(s[2])] = INT;
+                p = nl_arg[DIGIT(s[2])].i;
+                s += 4;
+            } else if (!l10n) {
+                p = f ? va_arg(*ap, int) : 0;
+                s += 2;
+            } else {
+                return -1;/* invalid */
+            }
+            xp = (p >= 0);
+        } else if (*s == '.') {
+            s++;
+            p = getint(&s);
+            xp = 1;
+        } else {
+            p = -1;
+            xp = 0;
+        }
+
+        /* Format specifier state machine */
+        st = 0;
+        do {
+            if (OOB(*s)) {
+                return -1; /* invalid */
+            }
+            ps = st;
+            st = states[st]S(*s++);
+        } while (st - 1 < STOP);
+        if (!st) {
+            return -1; /* invalid */
+        }
+
+        /* Check validity of argument type (nl/normal) */
+        if (st == NOARG) {
+            if (argpos >= 0) {
+                return -1; /* invalid */
+            }
+        } else {
+            if (argpos >= 0) {
+                nl_type[argpos] = st;
+                arg = nl_arg[argpos];
+            } else if (f) {
+                pop_arg(&arg, st, ap);
+            } else {
+                return 0;
+            }
+        }
+
+        if (!f) {
+            continue;
+        }
+
+        z = buf + sizeof(buf);
+        prefix = "-+   0X0x";
+        pl = 0;
+        t = s[-1];
+
+        /* - and 0 flags are mutually exclusive */
+        if (fl & LEFT_ADJ) {
+            fl &= ~ZERO_PAD;
+        }
+
+        if (t == 'n') {
+            if (!arg.p) {
+                continue;
+            }
+            switch (ps) {
+            case BARE:
+                *(int *)arg.p = cnt;
+                break;
+            case LPRE:
+                *(long *)arg.p = cnt;
+                break;
+            case LLPRE:
+                *(long long *)arg.p = cnt;
+                break;
+            case HPRE:
+                *(unsigned short *)arg.p = cnt;
+                break;
+            case HHPRE:
+                *(unsigned char *)arg.p = cnt;
+                break;
+            case ZTPRE:
+                *(word_t *)arg.p = cnt;
+                break;
+            case JPRE:
+                *(word_t *)arg.p = cnt;
+                break;
+            }
+            continue;
+        } else if (t == 'c') {
+            p = 1;
+            a = z - p;
+            *a = arg.i;
+            fl &= ~ZERO_PAD;
+        } else if (t == 's') {
+            a = arg.p ? arg.p : "(null)";
+            z = a + strnlen(a, p < 0 ? UINTPTR_MAX : p);
+            if (p < 0 && *z) {
+                return -1; /* overflow */
+            }
+            p = z - a;
+            fl &= ~ZERO_PAD;
+        } else {
+            switch (t) {
+            case 'p':
+                p = MAX(p, 2 * sizeof(void *));
+                t = 'x';
+                fl |= ALT_FORM;
+            case 'x':
+            case 'X':
+                a = fmt_x(arg.i, z, t & 32);
+                if (arg.i && (fl & ALT_FORM)) {
+                    prefix += (t >> 4);
+                    pl = 2;
+                }
+                break;
+            case 'o':
+                a = fmt_o(arg.i, z);
+                if ((fl & ALT_FORM) && p < (z - a + 1)) {
+                    p = z - a + 1;
+                }
+                break;
+            case 'd':
+            case 'i':
+                pl = 1;
+                if (arg.i > INTMAX_MAX) {
+                    arg.i = -arg.i;
+                } else if (fl & MARK_POS) {
+                    prefix++;
+                } else if (fl & PAD_POS) {
+                    prefix += 2;
+                } else {
+                    pl = 0;
+                }
+            case 'u':
+                a = fmt_u(arg.i, z);
+                break;
+            }
+            if (xp && p < 0) {
+                return -1; /* overflow */
+            }
+            if (xp) {
+                fl &= ~ZERO_PAD;
+            }
+            if (!arg.i && !p) {
+                a = z;
+            } else {
+                p = MAX(p, z - a + !arg.i);
+            }
+        }
+
+        if (p < z - a) {
+            p = z - a;
+        }
+        if (p > INTMAX_MAX - pl) {
+            return -1; /* overflow */
+        }
+        if (w < pl + p) {
+            w = pl + p;
+        }
+        if (w > INTMAX_MAX - cnt) {
+            return -1; /* overflow */
+        }
+
+        pad(f, ' ', w, pl + p, fl);
+        out(f, prefix, pl);
+        pad(f, '0', w, pl + p, fl ^ ZERO_PAD);
+        pad(f, '0', p, z - a, 0);
+        out(f, a, z - a);
+        pad(f, ' ', w, pl + p, fl ^ LEFT_ADJ);
+
+        l = w;
+    }
+
+    if (f) {
+        return cnt;
+    }
+    if (!l10n) {
+        return 0;
+    }
+
+    int i;
+    for (i = 1; i <= NL_ARGMAX && nl_type[i]; i++) {
+        pop_arg(nl_arg + i, nl_type[i], ap);
+    }
+    for (; i <= NL_ARGMAX && !nl_type[i]; i++);
+    if (i <= NL_ARGMAX) {
+        return -1; /* invalid */
+    }
+
+    return 1;
+}
+
+static int vprintf(out_wrap_t *out, const char *fmt, va_list ap)
+{
+    va_list ap2;
+    int nl_type[NL_ARGMAX + 1] = {0};
+    union arg nl_arg[NL_ARGMAX + 1];
+    int ret;
+
+    /* validate format string */
+    va_copy(ap2, ap);
+    if (printf_core(NULL, fmt, &ap2, nl_arg, nl_type) < 0) {
+        va_end(ap2);
+        return -1;
+    }
+
+    ret = printf_core(out, fmt, &ap2, nl_arg, nl_type);
+    va_end(ap2);
+    return ret;
+}
 
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
- *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ *------------------------------------------------------------------------------
+ * Kernel printing API
+ *------------------------------------------------------------------------------
  */
+
+int impl_kvprintf(const char *format, va_list ap)
+{
+    out_wrap_t out_wrap =  {
+        .write  = do_output_to_putchar,
+        .buf    = NULL,
+        .maxlen = 0,
+        .used   = 0
+    };
+
+    return vprintf(&out_wrap, format, ap);
+}
+
+int impl_ksnvprintf(char *str, word_t size, const char *format, va_list ap)
+{
+    if (!str) {
+        size = 0;
+    }
+
+    out_wrap_t out_wrap =  {
+        .write  = do_output_to_buffer,
+        .buf    = str,
+        .maxlen = size,
+        .used   = 0
+    };
+
+    int ret = vprintf(&out_wrap, format, ap);
+
+    /* We return the number of characters written into the buffer, excluding the
+     * terminating null char. However, we do never write more than 'size' bytes,
+     * that includes the terminating null char. If the output was truncated due
+     * to this limit, then the return value is the number of chars excluding the
+     * terminating null byte, which would have been written to the buffer, if
+     * enough space had been available. Thus, a return value of 'size' or more
+     * means that the output was truncated.
+     */
+    if ((ret > 0) && (size > 0)) {
+        str[(ret < size) ? ret : size - 1] = '\0';
+    }
+
+    return ret;
+}
+
+#endif /* CONFIG_PRINTING */
+#line 1 "/Users/payas/git/seL4/src/machine/registerset.c"
+/*
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ */
+
 #include <machine/registerset.h>
 
 const register_t fault_messages[][MAX_MSG_SIZE] = {
     [MessageID_Syscall] = SYSCALL_MESSAGE,
-    [MessageID_Exception] = EXCEPTION_MESSAGE
+    [MessageID_Exception] = EXCEPTION_MESSAGE,
+#ifdef CONFIG_KERNEL_MCS
+    [MessageID_TimeoutReply] = TIMEOUT_REPLY_MESSAGE,
+#endif
 };
-
+#line 1 "/Users/payas/git/seL4/src/model/preemption.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <api/failures.h>
@@ -15910,8 +18189,7 @@ const register_t fault_messages[][MAX_MSG_SIZE] = {
 /*
  * Possibly preempt the current thread to allow an interrupt to be handled.
  */
-exception_t
-preemptionPoint(void)
+exception_t preemptionPoint(void)
 {
     /* Record that we have performed some work. */
     ksWorkUnitsCompleted++;
@@ -15926,7 +18204,13 @@ preemptionPoint(void)
      */
     if (ksWorkUnitsCompleted >= CONFIG_MAX_NUM_WORK_UNITS_PER_PREEMPTION) {
         ksWorkUnitsCompleted = 0;
+#ifdef CONFIG_KERNEL_MCS
+        updateTimestamp();
+        if (!(sc_active(NODE_STATE(ksCurSC)) && refill_sufficient(NODE_STATE(ksCurSC), NODE_STATE(ksConsumed)))
+            || isCurDomainExpired() || isIRQPending()) {
+#else
         if (isIRQPending()) {
+#endif
             return EXCEPTION_PREEMPTED;
         }
     }
@@ -15934,17 +18218,11 @@ preemptionPoint(void)
     return EXCEPTION_NONE;
 }
 
-
+#line 1 "/Users/payas/git/seL4/src/model/smp.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -15966,15 +18244,11 @@ void migrateTCB(tcb_t *tcb, word_t new_core)
 }
 
 #endif /* ENABLE_SMP_SUPPORT */
-
+#line 1 "/Users/payas/git/seL4/src/model/statedata.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -15998,6 +18272,10 @@ UP_STATE_DEFINE(tcb_queue_t, ksReadyQueues[NUM_READY_QUEUES]);
 UP_STATE_DEFINE(word_t, ksReadyQueuesL1Bitmap[CONFIG_NUM_DOMAINS]);
 UP_STATE_DEFINE(word_t, ksReadyQueuesL2Bitmap[CONFIG_NUM_DOMAINS][L2_BITMAP_SIZE]);
 compile_assert(ksReadyQueuesL1BitmapBigEnough, (L2_BITMAP_SIZE - 1) <= wordBits)
+#ifdef CONFIG_KERNEL_MCS
+/* Head of the queue of threads waiting for their budget to be replenished */
+UP_STATE_DEFINE(tcb_t *, ksReleaseHead);
+#endif
 
 /* Current thread TCB pointer */
 UP_STATE_DEFINE(tcb_t *, ksCurThread);
@@ -16016,24 +18294,49 @@ UP_STATE_DEFINE(user_fpu_state_t *, ksActiveFPUState);
 
 UP_STATE_DEFINE(word_t, ksFPURestoresSinceSwitch);
 #endif /* CONFIG_HAVE_FPU */
+#ifdef CONFIG_KERNEL_MCS
+/* the amount of time passed since the kernel time was last updated */
+UP_STATE_DEFINE(ticks_t, ksConsumed);
+/* whether we need to reprogram the timer before exiting the kernel */
+UP_STATE_DEFINE(bool_t, ksReprogram);
+/* the current kernel time (recorded on kernel entry) */
+UP_STATE_DEFINE(ticks_t, ksCurTime);
+/* current scheduling context pointer */
+UP_STATE_DEFINE(sched_context_t *, ksCurSC);
+UP_STATE_DEFINE(sched_context_t *, ksIdleSC);
+#endif
 
 #ifdef CONFIG_DEBUG_BUILD
 UP_STATE_DEFINE(tcb_t *, ksDebugTCBs);
 #endif /* CONFIG_DEBUG_BUILD */
+#ifdef CONFIG_BENCHMARK_TRACK_UTILISATION
+UP_STATE_DEFINE(bool_t, benchmark_log_utilisation_enabled);
+UP_STATE_DEFINE(timestamp_t, benchmark_start_time);
+UP_STATE_DEFINE(timestamp_t, benchmark_end_time);
+UP_STATE_DEFINE(timestamp_t, benchmark_kernel_time);
+UP_STATE_DEFINE(timestamp_t, benchmark_kernel_number_entries);
+UP_STATE_DEFINE(timestamp_t, benchmark_kernel_number_schedules);
+#endif /* CONFIG_BENCHMARK_TRACK_UTILISATION */
 
 /* Units of work we have completed since the last time we checked for
  * pending interrupts */
 word_t ksWorkUnitsCompleted;
 
-/* CNode containing interrupt handler endpoints */
-irq_state_t intStateIRQTable[maxIRQ + 1];
-cte_t *intStateIRQNode;
+irq_state_t intStateIRQTable[INT_STATE_ARRAY_SIZE];
+/* CNode containing interrupt handler endpoints - like all seL4 objects, this CNode needs to be
+ * of a size that is a power of 2 and aligned to its size. */
+cte_t intStateIRQNode[BIT(IRQ_CNODE_SLOT_BITS)] ALIGN(BIT(IRQ_CNODE_SLOT_BITS + seL4_SlotBits));
+compile_assert(irqCNodeSize, sizeof(intStateIRQNode) >= ((INT_STATE_ARRAY_SIZE) *sizeof(cte_t)));
 
 /* Currently active domain */
 dom_t ksCurDomain;
 
 /* Domain timeslice remaining */
+#ifdef CONFIG_KERNEL_MCS
+ticks_t ksDomainTime;
+#else
 word_t ksDomainTime;
+#endif
 
 /* An index into ksDomSchedule for active domain and length. */
 word_t ksDomScheduleIdx;
@@ -16041,22 +18344,26 @@ word_t ksDomScheduleIdx;
 /* Only used by lockTLBEntry */
 word_t tlbLockCount = 0;
 
+/* Idle thread. */
+SECTION("._idle_thread") char ksIdleThreadTCB[CONFIG_MAX_NUM_NODES][BIT(seL4_TCBBits)] ALIGN(BIT(TCB_SIZE_BITS));
+
+#ifdef CONFIG_KERNEL_MCS
+/* Idle thread Schedcontexts */
+char ksIdleThreadSC[CONFIG_MAX_NUM_NODES][BIT(seL4_MinSchedContextBits)] ALIGN(BIT(seL4_MinSchedContextBits));
+#endif
+
 #if (defined CONFIG_DEBUG_BUILD || defined CONFIG_BENCHMARK_TRACK_KERNEL_ENTRIES)
 kernel_entry_t ksKernelEntry;
 #endif /* DEBUG */
 
-#ifdef CONFIG_BENCHMARK_USE_KERNEL_LOG_BUFFER
+#ifdef CONFIG_KERNEL_LOG_BUFFER
 paddr_t ksUserLogBuffer;
-#endif /* CONFIG_BENCHMARK_USE_KERNEL_LOG_BUFFER */
-
+#endif /* CONFIG_KERNEL_LOG_BUFFER */
+#line 1 "/Users/payas/git/seL4/src/object/cnode.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <assert.h>
@@ -16086,11 +18393,16 @@ typedef struct finaliseSlot_ret finaliseSlot_ret_t;
 
 static finaliseSlot_ret_t finaliseSlot(cte_t *slot, bool_t exposed);
 static void emptySlot(cte_t *slot, cap_t cleanupInfo);
-static exception_t reduceZombie(cte_t* slot, bool_t exposed);
+static exception_t reduceZombie(cte_t *slot, bool_t exposed);
 
-exception_t
-decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
-                      extra_caps_t excaps, word_t *buffer)
+#ifdef CONFIG_KERNEL_MCS
+#define CNODE_LAST_INVOCATION CNodeRotate
+#else
+#define CNODE_LAST_INVOCATION CNodeSaveCaller
+#endif
+
+exception_t decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
+                                  word_t *buffer)
 {
     lookupSlot_ret_t lu_ret;
     cte_t *destSlot;
@@ -16100,7 +18412,7 @@ decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
     /* Haskell error: "decodeCNodeInvocation: invalid cap" */
     assert(cap_get_capType(cap) == cap_cnode_cap);
 
-    if (invLabel < CNodeRevoke || invLabel > CNodeSaveCaller) {
+    if (invLabel < CNodeRevoke || invLabel > CNODE_LAST_INVOCATION) {
         userError("CNodeCap: Illegal Operation attempted.");
         current_syscall_error.type = seL4_IllegalOperation;
         return EXCEPTION_SYSCALL_ERROR;
@@ -16130,7 +18442,7 @@ decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
         deriveCap_ret_t dc_ret;
         cap_t srcCap;
 
-        if (length < 4 || excaps.excaprefs[0] == NULL) {
+        if (length < 4 || current_extra_caps.excaprefs[0] == NULL) {
             userError("CNode Copy/Mint/Move/Mutate: Truncated message.");
             current_syscall_error.type = seL4_TruncatedMessage;
             return EXCEPTION_SYSCALL_ERROR;
@@ -16138,7 +18450,7 @@ decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
         srcIndex = getSyscallArg(2, buffer);
         srcDepth = getSyscallArg(3, buffer);
 
-        srcRoot = excaps.excaprefs[0]->cap;
+        srcRoot = current_extra_caps.excaprefs[0]->cap;
 
         status = ensureEmptySlot(destSlot);
         if (status != EXCEPTION_NONE) {
@@ -16224,7 +18536,7 @@ decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
             break;
 
         default:
-            assert (0);
+            assert(0);
             return EXCEPTION_NONE;
         }
 
@@ -16252,6 +18564,7 @@ decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
         return invokeCNodeDelete(destSlot);
     }
 
+#ifndef CONFIG_KERNEL_MCS
     if (invLabel == CNodeSaveCaller) {
         status = ensureEmptySlot(destSlot);
         if (status != EXCEPTION_NONE) {
@@ -16262,6 +18575,7 @@ decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
         setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
         return invokeCNodeSaveCaller(destSlot);
     }
+#endif
 
     if (invLabel == CNodeCancelBadgedSends) {
         cap_t destCap;
@@ -16283,8 +18597,8 @@ decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
         cte_t *pivotSlot, *srcSlot;
         cap_t pivotRoot, srcRoot, newSrcCap, newPivotCap;
 
-        if (length < 8 || excaps.excaprefs[0] == NULL
-                || excaps.excaprefs[1] == NULL) {
+        if (length < 8 || current_extra_caps.excaprefs[0] == NULL
+            || current_extra_caps.excaprefs[1] == NULL) {
             current_syscall_error.type = seL4_TruncatedMessage;
             return EXCEPTION_SYSCALL_ERROR;
         }
@@ -16295,8 +18609,8 @@ decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
         srcIndex     = getSyscallArg(6, buffer);
         srcDepth     = getSyscallArg(7, buffer);
 
-        pivotRoot = excaps.excaprefs[0]->cap;
-        srcRoot   = excaps.excaprefs[1]->cap;
+        pivotRoot = current_extra_caps.excaprefs[0]->cap;
+        srcRoot   = current_extra_caps.excaprefs[1]->cap;
 
         lu_ret = lookupSourceSlot(srcRoot, srcIndex, srcDepth);
         if (lu_ret.status != EXCEPTION_NONE) {
@@ -16360,49 +18674,43 @@ decodeCNodeInvocation(word_t invLabel, word_t length, cap_t cap,
     return EXCEPTION_NONE;
 }
 
-exception_t
-invokeCNodeRevoke(cte_t *destSlot)
+exception_t invokeCNodeRevoke(cte_t *destSlot)
 {
     return cteRevoke(destSlot);
 }
 
-exception_t
-invokeCNodeDelete(cte_t *destSlot)
+exception_t invokeCNodeDelete(cte_t *destSlot)
 {
     return cteDelete(destSlot, true);
 }
 
-exception_t
-invokeCNodeCancelBadgedSends(cap_t cap)
+exception_t invokeCNodeCancelBadgedSends(cap_t cap)
 {
     word_t badge = cap_endpoint_cap_get_capEPBadge(cap);
     if (badge) {
-        endpoint_t* ep = (endpoint_t*)
+        endpoint_t *ep = (endpoint_t *)
                          cap_endpoint_cap_get_capEPPtr(cap);
         cancelBadgedSends(ep, badge);
     }
     return EXCEPTION_NONE;
 }
 
-exception_t
-invokeCNodeInsert(cap_t cap, cte_t *srcSlot, cte_t *destSlot)
+exception_t invokeCNodeInsert(cap_t cap, cte_t *srcSlot, cte_t *destSlot)
 {
     cteInsert(cap, srcSlot, destSlot);
 
     return EXCEPTION_NONE;
 }
 
-exception_t
-invokeCNodeMove(cap_t cap, cte_t *srcSlot, cte_t *destSlot)
+exception_t invokeCNodeMove(cap_t cap, cte_t *srcSlot, cte_t *destSlot)
 {
     cteMove(cap, srcSlot, destSlot);
 
     return EXCEPTION_NONE;
 }
 
-exception_t
-invokeCNodeRotate(cap_t cap1, cap_t cap2, cte_t *slot1,
-                  cte_t *slot2, cte_t *slot3)
+exception_t invokeCNodeRotate(cap_t cap1, cap_t cap2, cte_t *slot1,
+                              cte_t *slot2, cte_t *slot3)
 {
     if (slot1 == slot3) {
         cteSwap(cap1, slot1, cap2, slot2);
@@ -16414,8 +18722,8 @@ invokeCNodeRotate(cap_t cap1, cap_t cap2, cte_t *slot1,
     return EXCEPTION_NONE;
 }
 
-exception_t
-invokeCNodeSaveCaller(cte_t *destSlot)
+#ifndef CONFIG_KERNEL_MCS
+exception_t invokeCNodeSaveCaller(cte_t *destSlot)
 {
     cap_t cap;
     cte_t *srcSlot;
@@ -16441,28 +18749,27 @@ invokeCNodeSaveCaller(cte_t *destSlot)
 
     return EXCEPTION_NONE;
 }
+#endif
 
 /*
  * If creating a child UntypedCap, don't allow new objects to be created in the
  * parent.
  */
-static void
-setUntypedCapAsFull(cap_t srcCap, cap_t newCap, cte_t *srcSlot)
+static void setUntypedCapAsFull(cap_t srcCap, cap_t newCap, cte_t *srcSlot)
 {
     if ((cap_get_capType(srcCap) == cap_untyped_cap)
-            && (cap_get_capType(newCap) == cap_untyped_cap)) {
+        && (cap_get_capType(newCap) == cap_untyped_cap)) {
         if ((cap_untyped_cap_get_capPtr(srcCap)
-                == cap_untyped_cap_get_capPtr(newCap))
-                && (cap_untyped_cap_get_capBlockSize(newCap)
-                    == cap_untyped_cap_get_capBlockSize(srcCap))) {
+             == cap_untyped_cap_get_capPtr(newCap))
+            && (cap_untyped_cap_get_capBlockSize(newCap)
+                == cap_untyped_cap_get_capBlockSize(srcCap))) {
             cap_untyped_cap_ptr_set_capFreeIndex(&(srcSlot->cap),
                                                  MAX_FREE_INDEX(cap_untyped_cap_get_capBlockSize(srcCap)));
         }
     }
 }
 
-void
-cteInsert(cap_t newCap, cte_t *srcSlot, cte_t *destSlot)
+void cteInsert(cap_t newCap, cte_t *srcSlot, cte_t *destSlot)
 {
     mdb_node_t srcMDB, newMDB;
     cap_t srcCap;
@@ -16480,8 +18787,8 @@ cteInsert(cap_t newCap, cte_t *srcSlot, cte_t *destSlot)
     /* Haskell error: "cteInsert to non-empty destination" */
     assert(cap_get_capType(destSlot->cap) == cap_null_cap);
     /* Haskell error: "cteInsert: mdb entry must be empty" */
-    assert((cte_t*)mdb_node_get_mdbNext(destSlot->cteMDBNode) == NULL &&
-           (cte_t*)mdb_node_get_mdbPrev(destSlot->cteMDBNode) == NULL);
+    assert((cte_t *)mdb_node_get_mdbNext(destSlot->cteMDBNode) == NULL &&
+           (cte_t *)mdb_node_get_mdbPrev(destSlot->cteMDBNode) == NULL);
 
     /* Prevent parent untyped cap from being used again if creating a child
      * untyped from it. */
@@ -16497,8 +18804,7 @@ cteInsert(cap_t newCap, cte_t *srcSlot, cte_t *destSlot)
     }
 }
 
-void
-cteMove(cap_t newCap, cte_t *srcSlot, cte_t *destSlot)
+void cteMove(cap_t newCap, cte_t *srcSlot, cte_t *destSlot)
 {
     mdb_node_t mdb;
     word_t prev_ptr, next_ptr;
@@ -16506,8 +18812,8 @@ cteMove(cap_t newCap, cte_t *srcSlot, cte_t *destSlot)
     /* Haskell error: "cteMove to non-empty destination" */
     assert(cap_get_capType(destSlot->cap) == cap_null_cap);
     /* Haskell error: "cteMove: mdb entry must be empty" */
-    assert((cte_t*)mdb_node_get_mdbNext(destSlot->cteMDBNode) == NULL &&
-           (cte_t*)mdb_node_get_mdbPrev(destSlot->cteMDBNode) == NULL);
+    assert((cte_t *)mdb_node_get_mdbNext(destSlot->cteMDBNode) == NULL &&
+           (cte_t *)mdb_node_get_mdbPrev(destSlot->cteMDBNode) == NULL);
 
     mdb = srcSlot->cteMDBNode;
     destSlot->cap = newCap;
@@ -16528,8 +18834,7 @@ cteMove(cap_t newCap, cte_t *srcSlot, cte_t *destSlot)
             CTE_REF(destSlot));
 }
 
-void
-capSwapForDelete(cte_t *slot1, cte_t *slot2)
+void capSwapForDelete(cte_t *slot1, cte_t *slot2)
 {
     cap_t cap1, cap2;
 
@@ -16543,8 +18848,7 @@ capSwapForDelete(cte_t *slot1, cte_t *slot2)
     cteSwap(cap1, slot1, cap2, slot2);
 }
 
-void
-cteSwap(cap_t cap1, cte_t *slot1, cap_t cap2, cte_t *slot2)
+void cteSwap(cap_t cap1, cte_t *slot1, cap_t cap2, cte_t *slot2)
 {
     mdb_node_t mdb1, mdb2;
     word_t next_ptr, prev_ptr;
@@ -16583,8 +18887,7 @@ cteSwap(cap_t cap1, cte_t *slot1, cap_t cap2, cte_t *slot2)
             CTE_REF(slot1));
 }
 
-exception_t
-cteRevoke(cte_t *slot)
+exception_t cteRevoke(cte_t *slot)
 {
     cte_t *nextPtr;
     exception_t status;
@@ -16592,8 +18895,8 @@ cteRevoke(cte_t *slot)
     /* there is no need to check for a NullCap as NullCaps are
        always accompanied by null mdb pointers */
     for (nextPtr = CTE_PTR(mdb_node_get_mdbNext(slot->cteMDBNode));
-            nextPtr && isMDBParentOf(slot, nextPtr);
-            nextPtr = CTE_PTR(mdb_node_get_mdbNext(slot->cteMDBNode))) {
+         nextPtr && isMDBParentOf(slot, nextPtr);
+         nextPtr = CTE_PTR(mdb_node_get_mdbNext(slot->cteMDBNode))) {
         status = cteDelete(nextPtr, true);
         if (status != EXCEPTION_NONE) {
             return status;
@@ -16608,8 +18911,7 @@ cteRevoke(cte_t *slot)
     return EXCEPTION_NONE;
 }
 
-exception_t
-cteDelete(cte_t *slot, bool_t exposed)
+exception_t cteDelete(cte_t *slot, bool_t exposed)
 {
     finaliseSlot_ret_t fs_ret;
 
@@ -16624,8 +18926,7 @@ cteDelete(cte_t *slot, bool_t exposed)
     return EXCEPTION_NONE;
 }
 
-static void
-emptySlot(cte_t *slot, cap_t cleanupInfo)
+static void emptySlot(cte_t *slot, cap_t cleanupInfo)
 {
     if (cap_get_capType(slot->cap) != cap_null_cap) {
         mdb_node_t mdbNode;
@@ -16652,15 +18953,14 @@ emptySlot(cte_t *slot, cap_t cleanupInfo)
     }
 }
 
-static inline bool_t CONST
-capRemovable(cap_t cap, cte_t* slot)
+static inline bool_t CONST capRemovable(cap_t cap, cte_t *slot)
 {
     switch (cap_get_capType(cap)) {
     case cap_null_cap:
         return true;
     case cap_zombie_cap: {
         word_t n = cap_zombie_cap_get_capZombieNumber(cap);
-        cte_t* z_slot = (cte_t*)cap_zombie_cap_get_capZombiePtr(cap);
+        cte_t *z_slot = (cte_t *)cap_zombie_cap_get_capZombiePtr(cap);
         return (n == 0 || (n == 1 && slot == z_slot));
     }
     default:
@@ -16668,15 +18968,13 @@ capRemovable(cap_t cap, cte_t* slot)
     }
 }
 
-static inline bool_t CONST
-capCyclicZombie(cap_t cap, cte_t *slot)
+static inline bool_t CONST capCyclicZombie(cap_t cap, cte_t *slot)
 {
     return cap_get_capType(cap) == cap_zombie_cap &&
            CTE_PTR(cap_zombie_cap_get_capZombiePtr(cap)) == slot;
 }
 
-static finaliseSlot_ret_t
-finaliseSlot(cte_t *slot, bool_t immediate)
+static finaliseSlot_ret_t finaliseSlot(cte_t *slot, bool_t immediate)
 {
     bool_t final;
     finaliseCap_ret_t fc_ret;
@@ -16725,15 +19023,14 @@ finaliseSlot(cte_t *slot, bool_t immediate)
     return ret;
 }
 
-static exception_t
-reduceZombie(cte_t* slot, bool_t immediate)
+static exception_t reduceZombie(cte_t *slot, bool_t immediate)
 {
-    cte_t* ptr;
+    cte_t *ptr;
     word_t n, type;
     exception_t status;
 
     assert(cap_get_capType(slot->cap) == cap_zombie_cap);
-    ptr = (cte_t*)cap_zombie_cap_get_capZombiePtr(slot->cap);
+    ptr = (cte_t *)cap_zombie_cap_get_capZombiePtr(slot->cap);
     n = cap_zombie_cap_get_capZombieNumber(slot->cap);
     type = cap_zombie_cap_get_capZombieType(slot->cap);
 
@@ -16741,7 +19038,7 @@ reduceZombie(cte_t* slot, bool_t immediate)
     assert(n > 0);
 
     if (immediate) {
-        cte_t* endSlot = &ptr[n - 1];
+        cte_t *endSlot = &ptr[n - 1];
 
         status = cteDelete(endSlot, false);
         if (status != EXCEPTION_NONE) {
@@ -16753,12 +19050,12 @@ reduceZombie(cte_t* slot, bool_t immediate)
             break;
 
         case cap_zombie_cap: {
-            cte_t* ptr2 =
-                (cte_t*)cap_zombie_cap_get_capZombiePtr(slot->cap);
+            cte_t *ptr2 =
+                (cte_t *)cap_zombie_cap_get_capZombiePtr(slot->cap);
 
             if (ptr == ptr2 &&
-                    cap_zombie_cap_get_capZombieNumber(slot->cap) == n &&
-                    cap_zombie_cap_get_capZombieType(slot->cap) == type) {
+                cap_zombie_cap_get_capZombieNumber(slot->cap) == n &&
+                cap_zombie_cap_get_capZombieType(slot->cap) == type) {
                 assert(cap_get_capType(endSlot->cap) == cap_null_cap);
                 slot->cap =
                     cap_zombie_cap_set_capZombieNumber(slot->cap, n - 1);
@@ -16788,8 +19085,7 @@ reduceZombie(cte_t* slot, bool_t immediate)
     return EXCEPTION_NONE;
 }
 
-void
-cteDeleteOne(cte_t* slot)
+void cteDeleteOne(cte_t *slot)
 {
     word_t cap_type = cap_get_capType(slot->cap);
     if (cap_type != cap_null_cap) {
@@ -16808,8 +19104,7 @@ cteDeleteOne(cte_t* slot)
     }
 }
 
-void
-insertNewCap(cte_t *parent, cte_t *slot, cap_t cap)
+void insertNewCap(cte_t *parent, cte_t *slot, cap_t cap)
 {
     cte_t *next;
 
@@ -16822,8 +19117,8 @@ insertNewCap(cte_t *parent, cte_t *slot, cap_t cap)
     mdb_node_ptr_set_mdbNext(&parent->cteMDBNode, CTE_REF(slot));
 }
 
-void
-setupReplyMaster(tcb_t *thread)
+#ifndef CONFIG_KERNEL_MCS
+void setupReplyMaster(tcb_t *thread)
 {
     cte_t *slot;
 
@@ -16831,15 +19126,15 @@ setupReplyMaster(tcb_t *thread)
     if (cap_get_capType(slot->cap) == cap_null_cap) {
         /* Haskell asserts that no reply caps exist for this thread here. This
          * cannot be translated. */
-        slot->cap = cap_reply_cap_new(true, TCB_REF(thread));
+        slot->cap = cap_reply_cap_new(true, true, TCB_REF(thread));
         slot->cteMDBNode = nullMDBNode;
         mdb_node_ptr_set_mdbRevocable(&slot->cteMDBNode, true);
         mdb_node_ptr_set_mdbFirstBadged(&slot->cteMDBNode, true);
     }
 }
+#endif
 
-bool_t PURE
-isMDBParentOf(cte_t *cte_a, cte_t *cte_b)
+bool_t PURE isMDBParentOf(cte_t *cte_a, cte_t *cte_b)
 {
     if (!mdb_node_get_mdbRevocable(cte_a->cteMDBNode)) {
         return false;
@@ -16879,8 +19174,7 @@ isMDBParentOf(cte_t *cte_a, cte_t *cte_b)
     }
 }
 
-exception_t
-ensureNoChildren(cte_t *slot)
+exception_t ensureNoChildren(cte_t *slot)
 {
     if (mdb_node_get_mdbNext(slot->cteMDBNode) != 0) {
         cte_t *next;
@@ -16895,8 +19189,7 @@ ensureNoChildren(cte_t *slot)
     return EXCEPTION_NONE;
 }
 
-exception_t
-ensureEmptySlot(cte_t *slot)
+exception_t ensureEmptySlot(cte_t *slot)
 {
     if (cap_get_capType(slot->cap) != cap_null_cap) {
         current_syscall_error.type = seL4_DeleteFirst;
@@ -16906,8 +19199,7 @@ ensureEmptySlot(cte_t *slot)
     return EXCEPTION_NONE;
 }
 
-bool_t PURE
-isFinalCapability(cte_t *cte)
+bool_t PURE isFinalCapability(cte_t *cte)
 {
     mdb_node_t mdb;
     bool_t prevIsSameObject;
@@ -16937,8 +19229,7 @@ isFinalCapability(cte_t *cte)
     }
 }
 
-bool_t PURE
-slotCapLongRunningDelete(cte_t *slot)
+bool_t PURE slotCapLongRunningDelete(cte_t *slot)
 {
     if (cap_get_capType(slot->cap) == cap_null_cap) {
         return false;
@@ -16957,8 +19248,7 @@ slotCapLongRunningDelete(cte_t *slot)
 
 /* This implementation is specialised to the (current) limit
  * of one cap receive slot. */
-cte_t *
-getReceiveSlots(tcb_t *thread, word_t *buffer)
+cte_t *getReceiveSlots(tcb_t *thread, word_t *buffer)
 {
     cap_transfer_t ct;
     cptr_t cptr;
@@ -16993,24 +19283,21 @@ getReceiveSlots(tcb_t *thread, word_t *buffer)
     return slot;
 }
 
-cap_transfer_t PURE
-loadCapTransfer(word_t *buffer)
+cap_transfer_t PURE loadCapTransfer(word_t *buffer)
 {
     const int offset = seL4_MsgMaxLength + seL4_MsgMaxExtraCaps + 2;
     return capTransferFromWords(buffer + offset);
 }
-
+#line 1 "/Users/payas/git/seL4/src/object/endpoint.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <types.h>
+#include <string.h>
+#include <sel4/constants.h>
 #include <kernel/thread.h>
 #include <kernel/vspace.h>
 #include <machine/registerset.h>
@@ -17020,27 +19307,13 @@ loadCapTransfer(word_t *buffer)
 #include <object/endpoint.h>
 #include <object/tcb.h>
 
-static inline tcb_queue_t PURE
-ep_ptr_get_queue(endpoint_t *epptr)
-{
-    tcb_queue_t queue;
-
-    queue.head = (tcb_t*)endpoint_ptr_get_epQueue_head(epptr);
-    queue.end = (tcb_t*)endpoint_ptr_get_epQueue_tail(epptr);
-
-    return queue;
-}
-
-static inline void
-ep_ptr_set_queue(endpoint_t *epptr, tcb_queue_t queue)
-{
-    endpoint_ptr_set_epQueue_head(epptr, (word_t)queue.head);
-    endpoint_ptr_set_epQueue_tail(epptr, (word_t)queue.end);
-}
-
-void
-sendIPC(bool_t blocking, bool_t do_call, word_t badge,
-        bool_t canGrant, tcb_t *thread, endpoint_t *epptr)
+#ifdef CONFIG_KERNEL_MCS
+void sendIPC(bool_t blocking, bool_t do_call, word_t badge,
+             bool_t canGrant, bool_t canGrantReply, bool_t canDonate, tcb_t *thread, endpoint_t *epptr)
+#else
+void sendIPC(bool_t blocking, bool_t do_call, word_t badge,
+             bool_t canGrant, bool_t canGrantReply, tcb_t *thread, endpoint_t *epptr)
+#endif
 {
     switch (endpoint_ptr_get_state(epptr)) {
     case EPState_Idle:
@@ -17057,6 +19330,8 @@ sendIPC(bool_t blocking, bool_t do_call, word_t badge,
                 &thread->tcbState, badge);
             thread_state_ptr_set_blockingIPCCanGrant(
                 &thread->tcbState, canGrant);
+            thread_state_ptr_set_blockingIPCCanGrantReply(
+                &thread->tcbState, canGrantReply);
             thread_state_ptr_set_blockingIPCIsCall(
                 &thread->tcbState, do_call);
 
@@ -17092,25 +19367,55 @@ sendIPC(bool_t blocking, bool_t do_call, word_t badge,
         /* Do the transfer */
         doIPCTransfer(thread, epptr, badge, canGrant, dest);
 
+#ifdef CONFIG_KERNEL_MCS
+        reply_t *reply = REPLY_PTR(thread_state_get_replyObject(dest->tcbState));
+        if (reply) {
+            reply_unlink(reply, dest);
+        }
+
+        if (do_call ||
+            seL4_Fault_ptr_get_seL4_FaultType(&thread->tcbFault) != seL4_Fault_NullFault) {
+            if (reply != NULL && (canGrant || canGrantReply)) {
+                reply_push(thread, dest, reply, canDonate);
+            } else {
+                setThreadState(thread, ThreadState_Inactive);
+            }
+        } else if (canDonate && dest->tcbSchedContext == NULL) {
+            schedContext_donate(thread->tcbSchedContext, dest);
+        }
+
+        /* blocked threads should have enough budget to get out of the kernel */
+        assert(dest->tcbSchedContext == NULL || refill_sufficient(dest->tcbSchedContext, 0));
+        assert(dest->tcbSchedContext == NULL || refill_ready(dest->tcbSchedContext));
+        setThreadState(dest, ThreadState_Running);
+        if (sc_sporadic(dest->tcbSchedContext) && dest->tcbSchedContext != NODE_STATE(ksCurSC)) {
+            refill_unblock_check(dest->tcbSchedContext);
+        }
+        possibleSwitchTo(dest);
+#else
+        bool_t replyCanGrant = thread_state_ptr_get_blockingIPCCanGrant(&dest->tcbState);;
+
         setThreadState(dest, ThreadState_Running);
         possibleSwitchTo(dest);
 
-        if (do_call ||
-                seL4_Fault_ptr_get_seL4_FaultType(&thread->tcbFault) != seL4_Fault_NullFault) {
-            if (canGrant) {
-                setupCallerCap(thread, dest);
+        if (do_call) {
+            if (canGrant || canGrantReply) {
+                setupCallerCap(thread, dest, replyCanGrant);
             } else {
                 setThreadState(thread, ThreadState_Inactive);
             }
         }
-
+#endif
         break;
     }
     }
 }
 
-void
-receiveIPC(tcb_t *thread, cap_t cap, bool_t isBlocking)
+#ifdef CONFIG_KERNEL_MCS
+void receiveIPC(tcb_t *thread, cap_t cap, bool_t isBlocking, cap_t replyCap)
+#else
+void receiveIPC(tcb_t *thread, cap_t cap, bool_t isBlocking)
+#endif
 {
     endpoint_t *epptr;
     notification_t *ntfnPtr;
@@ -17120,11 +19425,32 @@ receiveIPC(tcb_t *thread, cap_t cap, bool_t isBlocking)
 
     epptr = EP_PTR(cap_endpoint_cap_get_capEPPtr(cap));
 
+#ifdef CONFIG_KERNEL_MCS
+    reply_t *replyPtr = NULL;
+    if (cap_get_capType(replyCap) == cap_reply_cap) {
+        replyPtr = REPLY_PTR(cap_reply_cap_get_capReplyPtr(replyCap));
+        if (unlikely(replyPtr->replyTCB != NULL && replyPtr->replyTCB != thread)) {
+            userError("Reply object already has unexecuted reply!");
+            cancelIPC(replyPtr->replyTCB);
+        }
+    }
+#endif
+
     /* Check for anything waiting in the notification */
     ntfnPtr = thread->tcbBoundNotification;
     if (ntfnPtr && notification_ptr_get_state(ntfnPtr) == NtfnState_Active) {
         completeSignal(ntfnPtr, thread);
     } else {
+#ifdef CONFIG_KERNEL_MCS
+        /* If this is a blocking recv and we didn't have a pending notification,
+         * then if we are running on an SC from a bound notification, then we
+         * need to return it so that we can passively wait on the EP for potentially
+         * SC donations from client threads.
+         */
+        if (ntfnPtr && isBlocking) {
+            maybeReturnSchedContext(ntfnPtr, thread);
+        }
+#endif
         switch (endpoint_ptr_get_state(epptr)) {
         case EPState_Idle:
         case EPState_Recv: {
@@ -17136,7 +19462,15 @@ receiveIPC(tcb_t *thread, cap_t cap, bool_t isBlocking)
                                             ThreadState_BlockedOnReceive);
                 thread_state_ptr_set_blockingObject(
                     &thread->tcbState, EP_REF(epptr));
-
+#ifdef CONFIG_KERNEL_MCS
+                thread_state_ptr_set_replyObject(&thread->tcbState, REPLY_REF(replyPtr));
+                if (replyPtr) {
+                    replyPtr->replyTCB = thread;
+                }
+#else
+                thread_state_ptr_set_blockingIPCCanGrant(
+                    &thread->tcbState, cap_endpoint_cap_get_capCanGrant(cap));
+#endif
                 scheduleTCB(thread);
 
                 /* Place calling thread in endpoint queue */
@@ -17155,6 +19489,7 @@ receiveIPC(tcb_t *thread, cap_t cap, bool_t isBlocking)
             tcb_t *sender;
             word_t badge;
             bool_t canGrant;
+            bool_t canGrantReply;
             bool_t do_call;
 
             /* Get the head of the endpoint queue. */
@@ -17176,6 +19511,8 @@ receiveIPC(tcb_t *thread, cap_t cap, bool_t isBlocking)
             badge = thread_state_ptr_get_blockingIPCBadge(&sender->tcbState);
             canGrant =
                 thread_state_ptr_get_blockingIPCCanGrant(&sender->tcbState);
+            canGrantReply =
+                thread_state_ptr_get_blockingIPCCanGrantReply(&sender->tcbState);
 
             /* Do the transfer */
             doIPCTransfer(sender, epptr, badge,
@@ -17183,10 +19520,38 @@ receiveIPC(tcb_t *thread, cap_t cap, bool_t isBlocking)
 
             do_call = thread_state_ptr_get_blockingIPCIsCall(&sender->tcbState);
 
+#ifdef CONFIG_KERNEL_MCS
+            if (sc_sporadic(sender->tcbSchedContext)) {
+                /* We know that the sender can't have the current SC as
+                 * its own SC as this point as it should still be
+                 * associated with the current thread, no thread, or a
+                 * thread that isn't blocked. This check is added here
+                 * to reduce the cost of proving this to be true as a
+                 * short-term stop-gap. */
+                assert(sender->tcbSchedContext != NODE_STATE(ksCurSC));
+                if (sender->tcbSchedContext != NODE_STATE(ksCurSC)) {
+                    refill_unblock_check(sender->tcbSchedContext);
+                }
+            }
+
             if (do_call ||
-                    seL4_Fault_get_seL4_FaultType(sender->tcbFault) != seL4_Fault_NullFault) {
-                if (canGrant) {
-                    setupCallerCap(sender, thread);
+                seL4_Fault_get_seL4_FaultType(sender->tcbFault) != seL4_Fault_NullFault) {
+                if ((canGrant || canGrantReply) && replyPtr != NULL) {
+                    bool_t canDonate = sender->tcbSchedContext != NULL
+                                       && seL4_Fault_get_seL4_FaultType(sender->tcbFault) != seL4_Fault_Timeout;
+                    reply_push(sender, thread, replyPtr, canDonate);
+                } else {
+                    setThreadState(sender, ThreadState_Inactive);
+                }
+            } else {
+                setThreadState(sender, ThreadState_Running);
+                possibleSwitchTo(sender);
+                assert(sender->tcbSchedContext == NULL || refill_sufficient(sender->tcbSchedContext, 0));
+            }
+#else
+            if (do_call) {
+                if (canGrant || canGrantReply) {
+                    setupCallerCap(sender, thread, cap_endpoint_cap_get_capCanGrant(cap));
                 } else {
                     setThreadState(sender, ThreadState_Inactive);
                 }
@@ -17194,15 +19559,14 @@ receiveIPC(tcb_t *thread, cap_t cap, bool_t isBlocking)
                 setThreadState(sender, ThreadState_Running);
                 possibleSwitchTo(sender);
             }
-
+#endif
             break;
         }
         }
     }
 }
 
-void
-replyFromKernel_error(tcb_t *thread)
+void replyFromKernel_error(tcb_t *thread)
 {
     word_t len;
     word_t *ipcBuffer;
@@ -17210,22 +19574,34 @@ replyFromKernel_error(tcb_t *thread)
     ipcBuffer = lookupIPCBuffer(true, thread);
     setRegister(thread, badgeRegister, 0);
     len = setMRs_syscall_error(thread, ipcBuffer);
+
+#ifdef CONFIG_KERNEL_INVOCATION_REPORT_ERROR_IPC
+    char *debugBuffer = (char *)(ipcBuffer + DEBUG_MESSAGE_START + 1);
+    word_t add = strlcpy(debugBuffer, (char *)current_debug_error.errorMessage,
+                         DEBUG_MESSAGE_MAXLEN * sizeof(word_t));
+
+    len += (add / sizeof(word_t)) + 1;
+#endif
+
     setRegister(thread, msgInfoRegister, wordFromMessageInfo(
                     seL4_MessageInfo_new(current_syscall_error.type, 0, 0, len)));
 }
 
-void
-replyFromKernel_success_empty(tcb_t *thread)
+void replyFromKernel_success_empty(tcb_t *thread)
 {
     setRegister(thread, badgeRegister, 0);
     setRegister(thread, msgInfoRegister, wordFromMessageInfo(
                     seL4_MessageInfo_new(0, 0, 0, 0)));
 }
 
-void
-cancelIPC(tcb_t *tptr)
+void cancelIPC(tcb_t *tptr)
 {
     thread_state_t *state = &tptr->tcbState;
+
+#ifdef CONFIG_KERNEL_MCS
+    /* cancel ipc cancels all faults */
+    seL4_Fault_NullFault_ptr_new(&tptr->tcbFault);
+#endif
 
     switch (thread_state_ptr_get_tsType(state)) {
     case ThreadState_BlockedOnSend:
@@ -17248,6 +19624,12 @@ cancelIPC(tcb_t *tptr)
             endpoint_ptr_set_state(epptr, EPState_Idle);
         }
 
+#ifdef CONFIG_KERNEL_MCS
+        reply_t *reply = REPLY_PTR(thread_state_get_replyObject(tptr->tcbState));
+        if (reply != NULL) {
+            reply_unlink(reply, tptr);
+        }
+#endif
         setThreadState(tptr, ThreadState_Inactive);
         break;
     }
@@ -17258,6 +19640,9 @@ cancelIPC(tcb_t *tptr)
         break;
 
     case ThreadState_BlockedOnReply: {
+#ifdef CONFIG_KERNEL_MCS
+        reply_remove_tcb(tptr);
+#else
         cte_t *slot, *callerCap;
 
         tptr->tcbFault = seL4_Fault_NullFault_new();
@@ -17271,14 +19656,14 @@ cancelIPC(tcb_t *tptr)
                 gs_set_assn cteDeleteOne_'proc (ucast cap_reply_cap))" */
             cteDeleteOne(callerCap);
         }
+#endif
 
         break;
     }
     }
 }
 
-void
-cancelAllIPC(endpoint_t *epptr)
+void cancelAllIPC(endpoint_t *epptr)
 {
     switch (endpoint_ptr_get_state(epptr)) {
     case EPState_Idle:
@@ -17294,8 +19679,32 @@ cancelAllIPC(endpoint_t *epptr)
 
         /* Set all blocked threads to restart */
         for (; thread; thread = thread->tcbEPNext) {
-            setThreadState (thread, ThreadState_Restart);
+#ifdef CONFIG_KERNEL_MCS
+            reply_t *reply = REPLY_PTR(thread_state_get_replyObject(thread->tcbState));
+            if (reply != NULL) {
+                reply_unlink(reply, thread);
+            }
+            if (seL4_Fault_get_seL4_FaultType(thread->tcbFault) == seL4_Fault_NullFault) {
+                setThreadState(thread, ThreadState_Restart);
+                if (sc_sporadic(thread->tcbSchedContext)) {
+                    /* We know that the thread can't have the current SC
+                     * as its own SC as this point as it should still be
+                     * associated with the current thread, or no thread.
+                     * This check is added here to reduce the cost of
+                     * proving this to be true as a short-term stop-gap. */
+                    assert(thread->tcbSchedContext != NODE_STATE(ksCurSC));
+                    if (thread->tcbSchedContext != NODE_STATE(ksCurSC)) {
+                        refill_unblock_check(thread->tcbSchedContext);
+                    }
+                }
+                possibleSwitchTo(thread);
+            } else {
+                setThreadState(thread, ThreadState_Inactive);
+            }
+#else
+            setThreadState(thread, ThreadState_Restart);
             SCHED_ENQUEUE(thread);
+#endif
         }
 
         rescheduleRequired();
@@ -17304,8 +19713,7 @@ cancelAllIPC(endpoint_t *epptr)
     }
 }
 
-void
-cancelBadgedSends(endpoint_t *epptr, word_t badge)
+void cancelBadgedSends(endpoint_t *epptr, word_t badge)
 {
     switch (endpoint_ptr_get_state(epptr)) {
     case EPState_Idle:
@@ -17327,11 +19735,37 @@ cancelBadgedSends(endpoint_t *epptr, word_t badge)
             word_t b = thread_state_ptr_get_blockingIPCBadge(
                            &thread->tcbState);
             next = thread->tcbEPNext;
+#ifdef CONFIG_KERNEL_MCS
+            /* senders do not have reply objects in their state, and we are only cancelling sends */
+            assert(REPLY_PTR(thread_state_get_replyObject(thread->tcbState)) == NULL);
+            if (b == badge) {
+                if (seL4_Fault_get_seL4_FaultType(thread->tcbFault) ==
+                    seL4_Fault_NullFault) {
+                    setThreadState(thread, ThreadState_Restart);
+                    if (sc_sporadic(thread->tcbSchedContext)) {
+                        /* We know that the thread can't have the current SC
+                         * as its own SC as this point as it should still be
+                         * associated with the current thread, or no thread.
+                         * This check is added here to reduce the cost of
+                         * proving this to be true as a short-term stop-gap. */
+                        assert(thread->tcbSchedContext != NODE_STATE(ksCurSC));
+                        if (thread->tcbSchedContext != NODE_STATE(ksCurSC)) {
+                            refill_unblock_check(thread->tcbSchedContext);
+                        }
+                    }
+                    possibleSwitchTo(thread);
+                } else {
+                    setThreadState(thread, ThreadState_Inactive);
+                }
+                queue = tcbEPDequeue(thread, queue);
+            }
+#else
             if (b == badge) {
                 setThreadState(thread, ThreadState_Restart);
                 SCHED_ENQUEUE(thread);
                 queue = tcbEPDequeue(thread, queue);
             }
+#endif
         }
         ep_ptr_set_queue(epptr, queue);
 
@@ -17349,14 +19783,20 @@ cancelBadgedSends(endpoint_t *epptr, word_t badge)
     }
 }
 
+#ifdef CONFIG_KERNEL_MCS
+void reorderEP(endpoint_t *epptr, tcb_t *thread)
+{
+    tcb_queue_t queue = ep_ptr_get_queue(epptr);
+    queue = tcbEPDequeue(thread, queue);
+    queue = tcbEPAppend(thread, queue);
+    ep_ptr_set_queue(epptr, queue);
+}
+#endif
+#line 1 "/Users/payas/git/seL4/src/object/interrupt.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <assert.h>
@@ -17373,13 +19813,10 @@ cancelBadgedSends(endpoint_t *epptr, word_t badge)
 #include <kernel/thread.h>
 #include <model/statedata.h>
 #include <machine/timer.h>
-#include <plat/machine/timer.h>
 #include <smp/ipi.h>
 
-exception_t
-decodeIRQControlInvocation(word_t invLabel, word_t length,
-                           cte_t *srcSlot, extra_caps_t excaps,
-                           word_t *buffer)
+exception_t decodeIRQControlInvocation(word_t invLabel, word_t length,
+                                       cte_t *srcSlot, word_t *buffer)
 {
     if (invLabel == IRQIssueIRQHandler) {
         word_t index, depth, irq_w;
@@ -17389,16 +19826,16 @@ decodeIRQControlInvocation(word_t invLabel, word_t length,
         lookupSlot_ret_t lu_ret;
         exception_t status;
 
-        if (length < 3 || excaps.excaprefs[0] == NULL) {
+        if (length < 3 || current_extra_caps.excaprefs[0] == NULL) {
             current_syscall_error.type = seL4_TruncatedMessage;
             return EXCEPTION_SYSCALL_ERROR;
         }
         irq_w = getSyscallArg(0, buffer);
-        irq = (irq_t) irq_w;
+        irq = CORE_IRQ_TO_IRQT(0, irq_w);
         index = getSyscallArg(1, buffer);
         depth = getSyscallArg(2, buffer);
 
-        cnodeCap = excaps.excaprefs[0]->cap;
+        cnodeCap = current_extra_caps.excaprefs[0]->cap;
 
         status = Arch_checkIRQ(irq_w);
         if (status != EXCEPTION_NONE) {
@@ -17407,14 +19844,14 @@ decodeIRQControlInvocation(word_t invLabel, word_t length,
 
         if (isIRQActive(irq)) {
             current_syscall_error.type = seL4_RevokeFirst;
-            userError("Rejecting request for IRQ %u. Already active.", (int)irq);
+            userError("Rejecting request for IRQ %u. Already active.", (int)IRQT_TO_IRQ(irq));
             return EXCEPTION_SYSCALL_ERROR;
         }
 
         lu_ret = lookupTargetSlot(cnodeCap, index, depth);
         if (lu_ret.status != EXCEPTION_NONE) {
             userError("Target slot for new IRQ Handler cap invalid: cap %lu, IRQ %u.",
-                      getExtraCPtr(buffer, 0), (int)irq);
+                      getExtraCPtr(buffer, 0), (int)IRQT_TO_IRQ(irq));
             return lu_ret.status;
         }
         destSlot = lu_ret.slot;
@@ -17422,29 +19859,26 @@ decodeIRQControlInvocation(word_t invLabel, word_t length,
         status = ensureEmptySlot(destSlot);
         if (status != EXCEPTION_NONE) {
             userError("Target slot for new IRQ Handler cap not empty: cap %lu, IRQ %u.",
-                      getExtraCPtr(buffer, 0), (int)irq);
+                      getExtraCPtr(buffer, 0), (int)IRQT_TO_IRQ(irq));
             return status;
         }
 
         setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
         return invokeIRQControl(irq, destSlot, srcSlot);
     } else {
-        return Arch_decodeIRQControlInvocation(invLabel, length, srcSlot, excaps, buffer);
+        return Arch_decodeIRQControlInvocation(invLabel, length, srcSlot, buffer);
     }
 }
 
-exception_t
-invokeIRQControl(irq_t irq, cte_t *handlerSlot, cte_t *controlSlot)
+exception_t invokeIRQControl(irq_t irq, cte_t *handlerSlot, cte_t *controlSlot)
 {
     setIRQState(IRQSignal, irq);
-    cteInsert(cap_irq_handler_cap_new(irq), controlSlot, handlerSlot);
+    cteInsert(cap_irq_handler_cap_new(IRQT_TO_IDX(irq)), controlSlot, handlerSlot);
 
     return EXCEPTION_NONE;
 }
 
-exception_t
-decodeIRQHandlerInvocation(word_t invLabel, irq_t irq,
-                           extra_caps_t excaps)
+exception_t decodeIRQHandlerInvocation(word_t invLabel, irq_t irq)
 {
     switch (invLabel) {
     case IRQAckIRQ:
@@ -17456,15 +19890,15 @@ decodeIRQHandlerInvocation(word_t invLabel, irq_t irq,
         cap_t ntfnCap;
         cte_t *slot;
 
-        if (excaps.excaprefs[0] == NULL) {
+        if (current_extra_caps.excaprefs[0] == NULL) {
             current_syscall_error.type = seL4_TruncatedMessage;
             return EXCEPTION_SYSCALL_ERROR;
         }
-        ntfnCap = excaps.excaprefs[0]->cap;
-        slot = excaps.excaprefs[0];
+        ntfnCap = current_extra_caps.excaprefs[0]->cap;
+        slot = current_extra_caps.excaprefs[0];
 
         if (cap_get_capType(ntfnCap) != cap_notification_cap ||
-                !cap_notification_cap_get_capNtfnCanSend(ntfnCap)) {
+            !cap_notification_cap_get_capNtfnCanSend(ntfnCap)) {
             if (cap_get_capType(ntfnCap) != cap_notification_cap) {
                 userError("IRQSetHandler: provided cap is not an notification capability.");
             } else {
@@ -17492,84 +19926,106 @@ decodeIRQHandlerInvocation(word_t invLabel, irq_t irq,
     }
 }
 
-void
-invokeIRQHandler_AckIRQ(irq_t irq)
+void invokeIRQHandler_AckIRQ(irq_t irq)
 {
+#ifdef CONFIG_ARCH_RISCV
+#if !defined(CONFIG_PLAT_QEMU_RISCV_VIRT)
+    /* QEMU has a bug where interrupts must be
+     * immediately claimed, which is done in getActiveIRQ. For other
+     * platforms, the claim can wait and be done here.
+     */
+    plic_complete_claim(irq);
+#endif
+#else
+
+#if defined ENABLE_SMP_SUPPORT && defined CONFIG_ARCH_ARM
+    if (IRQ_IS_PPI(irq) && IRQT_TO_CORE(irq) != getCurrentCPUIndex()) {
+        doRemoteMaskPrivateInterrupt(IRQT_TO_CORE(irq), false, IRQT_TO_IDX(irq));
+        return;
+    }
+#endif
     maskInterrupt(false, irq);
+#endif
 }
 
-void
-invokeIRQHandler_SetIRQHandler(irq_t irq, cap_t cap, cte_t *slot)
+void invokeIRQHandler_SetIRQHandler(irq_t irq, cap_t cap, cte_t *slot)
 {
     cte_t *irqSlot;
 
-    irqSlot = intStateIRQNode + irq;
+    irqSlot = intStateIRQNode + IRQT_TO_IDX(irq);
     /** GHOSTUPD: "(True, gs_set_assn cteDeleteOne_'proc (-1))" */
     cteDeleteOne(irqSlot);
     cteInsert(cap, slot, irqSlot);
 }
 
-void
-invokeIRQHandler_ClearIRQHandler(irq_t irq)
+void invokeIRQHandler_ClearIRQHandler(irq_t irq)
 {
     cte_t *irqSlot;
 
-    irqSlot = intStateIRQNode + irq;
+    irqSlot = intStateIRQNode + IRQT_TO_IDX(irq);
     /** GHOSTUPD: "(True, gs_set_assn cteDeleteOne_'proc (-1))" */
     cteDeleteOne(irqSlot);
 }
 
-void
-deletingIRQHandler(irq_t irq)
+void deletingIRQHandler(irq_t irq)
 {
     cte_t *slot;
 
-    slot = intStateIRQNode + irq;
+    slot = intStateIRQNode + IRQT_TO_IDX(irq);
     /** GHOSTUPD: "(True, gs_set_assn cteDeleteOne_'proc (ucast cap_notification_cap))" */
     cteDeleteOne(slot);
 }
 
-void
-deletedIRQHandler(irq_t irq)
+void deletedIRQHandler(irq_t irq)
 {
     setIRQState(IRQInactive, irq);
 }
 
-void
-handleInterrupt(irq_t irq)
+void handleInterrupt(irq_t irq)
 {
-    if (unlikely(irq > maxIRQ)) {
-        /* mask, ack and pretend it didn't happen. We assume that because
-         * the interrupt controller for the platform returned this IRQ that
-         * it is safe to use in mask and ack operations, even though it is
-         * above the claimed maxIRQ. i.e. we're assuming maxIRQ is wrong */
-        printf("Received IRQ %d, which is above the platforms maxIRQ of %d\n", (int)irq, (int)maxIRQ);
+    if (unlikely(IRQT_TO_IRQ(irq) > maxIRQ)) {
+        /* The interrupt number is out of range. Pretend it did not happen by
+         * handling it like an inactive interrupt (mask and ack). We assume this
+         * is acceptable, because the platform specific interrupt controller
+         * driver reported this interrupt. Maybe the value maxIRQ is just wrong
+         * or set to a lower value because the interrupts are unused.
+         */
+        printf("Received IRQ %d, which is above the platforms maxIRQ of %d\n", (int)IRQT_TO_IRQ(irq), (int)maxIRQ);
         maskInterrupt(true, irq);
         ackInterrupt(irq);
         return;
     }
-    switch (intStateIRQTable[irq]) {
+
+    switch (intStateIRQTable[IRQT_TO_IDX(irq)]) {
     case IRQSignal: {
+        /* Merging the variable declaration and initialization into one line
+         * requires an update in the proofs first. Might be a c89 legacy.
+         */
         cap_t cap;
-
-        cap = intStateIRQNode[irq].cap;
-
+        cap = intStateIRQNode[IRQT_TO_IDX(irq)].cap;
         if (cap_get_capType(cap) == cap_notification_cap &&
-                cap_notification_cap_get_capNtfnCanSend(cap)) {
+            cap_notification_cap_get_capNtfnCanSend(cap)) {
             sendSignal(NTFN_PTR(cap_notification_cap_get_capNtfnPtr(cap)),
                        cap_notification_cap_get_capNtfnBadge(cap));
         } else {
 #ifdef CONFIG_IRQ_REPORTING
-            printf("Undelivered IRQ: %d\n", (int)irq);
+            printf("Undelivered IRQ: %d\n", (int)IRQT_TO_IRQ(irq));
 #endif
         }
+#ifndef CONFIG_ARCH_RISCV
         maskInterrupt(true, irq);
+#endif
         break;
     }
 
     case IRQTimer:
+#ifdef CONFIG_KERNEL_MCS
+        ackDeadlineIRQ();
+        NODE_STATE(ksReprogram) = true;
+#else
         timerTick();
         resetTimer();
+#endif
         break;
 
 #ifdef ENABLE_SMP_SUPPORT
@@ -17579,21 +20035,17 @@ handleInterrupt(irq_t irq)
 #endif /* ENABLE_SMP_SUPPORT */
 
     case IRQReserved:
-#ifdef CONFIG_IRQ_REPORTING
-        printf("Received reserved IRQ: %d", (int)irq);
-#endif
         handleReservedIRQ(irq);
         break;
 
     case IRQInactive:
-        /*
-         * This case shouldn't happen anyway unless the hardware or
-         * platform code is broken. Hopefully masking it again should make
-         * the interrupt go away.
+        /* This case shouldn't happen anyway unless the hardware or platform
+         * code is broken. Hopefully masking it again should make the interrupt
+         * go away.
          */
         maskInterrupt(true, irq);
 #ifdef CONFIG_IRQ_REPORTING
-        printf("Received disabled IRQ: %d\n", (int)irq);
+        printf("Received disabled IRQ: %d\n", (int)IRQT_TO_IRQ(irq));
 #endif
         break;
 
@@ -17602,30 +20054,33 @@ handleInterrupt(irq_t irq)
         fail("Invalid IRQ state");
     }
 
+    /* Every interrupt is ack'd, even if it is an inactive one. Rationale is,
+     * that for any interrupt reported by the platform specific code the generic
+     * kernel code does report here that it is done with handling it. */
     ackInterrupt(irq);
 }
 
-bool_t
-isIRQActive(irq_t irq)
+bool_t isIRQActive(irq_t irq)
 {
-    return intStateIRQTable[irq] != IRQInactive;
+    return intStateIRQTable[IRQT_TO_IDX(irq)] != IRQInactive;
 }
 
-void
-setIRQState(irq_state_t irqState, irq_t irq)
+void setIRQState(irq_state_t irqState, irq_t irq)
 {
-    intStateIRQTable[irq] = irqState;
+    intStateIRQTable[IRQT_TO_IDX(irq)] = irqState;
+#if defined ENABLE_SMP_SUPPORT && defined CONFIG_ARCH_ARM
+    if (IRQ_IS_PPI(irq) && IRQT_TO_CORE(irq) != getCurrentCPUIndex()) {
+        doRemoteMaskPrivateInterrupt(IRQT_TO_CORE(irq), irqState == IRQInactive, IRQT_TO_IDX(irq));
+        return;
+    }
+#endif
     maskInterrupt(irqState == IRQInactive, irq);
 }
-
+#line 1 "/Users/payas/git/seL4/src/object/notification.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <assert.h>
@@ -17640,38 +20095,54 @@ setIRQState(irq_state_t irqState, irq_t irq)
 
 #include <object/notification.h>
 
-static inline tcb_queue_t PURE
-ntfn_ptr_get_queue(notification_t *ntfnPtr)
+static inline tcb_queue_t PURE ntfn_ptr_get_queue(notification_t *ntfnPtr)
 {
     tcb_queue_t ntfn_queue;
 
-    ntfn_queue.head = (tcb_t*)notification_ptr_get_ntfnQueue_head(ntfnPtr);
-    ntfn_queue.end = (tcb_t*)notification_ptr_get_ntfnQueue_tail(ntfnPtr);
+    ntfn_queue.head = (tcb_t *)notification_ptr_get_ntfnQueue_head(ntfnPtr);
+    ntfn_queue.end = (tcb_t *)notification_ptr_get_ntfnQueue_tail(ntfnPtr);
 
     return ntfn_queue;
 }
 
-static inline void
-ntfn_ptr_set_queue(notification_t *ntfnPtr, tcb_queue_t ntfn_queue)
+static inline void ntfn_ptr_set_queue(notification_t *ntfnPtr, tcb_queue_t ntfn_queue)
 {
     notification_ptr_set_ntfnQueue_head(ntfnPtr, (word_t)ntfn_queue.head);
     notification_ptr_set_ntfnQueue_tail(ntfnPtr, (word_t)ntfn_queue.end);
 }
 
-static inline void
-ntfn_set_active(notification_t *ntfnPtr, word_t badge)
+#ifdef CONFIG_KERNEL_MCS
+static inline void maybeDonateSchedContext(tcb_t *tcb, notification_t *ntfnPtr)
 {
-    notification_ptr_set_state(ntfnPtr, NtfnState_Active);
-    notification_ptr_set_ntfnMsgIdentifier(ntfnPtr, badge);
+    if (tcb->tcbSchedContext == NULL) {
+        sched_context_t *sc = SC_PTR(notification_ptr_get_ntfnSchedContext(ntfnPtr));
+        if (sc != NULL && sc->scTcb == NULL) {
+            schedContext_donate(sc, tcb);
+            schedContext_resume(sc);
+        }
+    }
 }
 
+#endif
 
-void
-sendSignal(notification_t *ntfnPtr, word_t badge)
+#ifdef CONFIG_KERNEL_MCS
+#define MCS_DO_IF_SC(tcb, ntfnPtr, _block) \
+    maybeDonateSchedContext(tcb, ntfnPtr); \
+    if (isSchedulable(tcb)) { \
+        _block \
+    }
+#else
+#define MCS_DO_IF_SC(tcb, ntfnPtr, _block) \
+    { \
+        _block \
+    }
+#endif
+
+void sendSignal(notification_t *ntfnPtr, word_t badge)
 {
     switch (notification_ptr_get_state(ntfnPtr)) {
     case NtfnState_Idle: {
-        tcb_t *tcb = (tcb_t*)notification_ptr_get_ntfnBoundTCB(ntfnPtr);
+        tcb_t *tcb = (tcb_t *)notification_ptr_get_ntfnBoundTCB(ntfnPtr);
         /* Check if we are bound and that thread is waiting for a message */
         if (tcb) {
             if (thread_state_ptr_get_tsType(&tcb->tcbState) == ThreadState_BlockedOnReceive) {
@@ -17679,7 +20150,22 @@ sendSignal(notification_t *ntfnPtr, word_t badge)
                 cancelIPC(tcb);
                 setThreadState(tcb, ThreadState_Running);
                 setRegister(tcb, badgeRegister, badge);
-                possibleSwitchTo(tcb);
+                MCS_DO_IF_SC(tcb, ntfnPtr, {
+                    possibleSwitchTo(tcb);
+                })
+#ifdef CONFIG_KERNEL_MCS
+                if (sc_sporadic(tcb->tcbSchedContext)) {
+                    /* We know that the tcb can't have the current SC
+                     * as its own SC as this point as it should still be
+                     * associated with the current thread, or no thread.
+                     * This check is added here to reduce the cost of
+                     * proving this to be true as a short-term stop-gap. */
+                    assert(tcb->tcbSchedContext != NODE_STATE(ksCurSC));
+                    if (tcb->tcbSchedContext != NODE_STATE(ksCurSC)) {
+                        refill_unblock_check(tcb->tcbSchedContext);
+                    }
+                }
+#endif
 #ifdef CONFIG_VTX
             } else if (thread_state_ptr_get_tsType(&tcb->tcbState) == ThreadState_RunningVM) {
 #ifdef ENABLE_SMP_SUPPORT
@@ -17692,7 +20178,24 @@ sendSignal(notification_t *ntfnPtr, word_t badge)
                     setThreadState(tcb, ThreadState_Running);
                     setRegister(tcb, badgeRegister, badge);
                     Arch_leaveVMAsyncTransfer(tcb);
-                    possibleSwitchTo(tcb);
+                    MCS_DO_IF_SC(tcb, ntfnPtr, {
+                        possibleSwitchTo(tcb);
+                    })
+#ifdef CONFIG_KERNEL_MCS
+                    if (tcb->tcbSchedContext != NULL && sc_active(tcb->tcbSchedContext)) {
+                        sched_context_t *sc = SC_PTR(notification_ptr_get_ntfnSchedContext(ntfnPtr));
+                        if (tcb->tcbSchedContext == sc && sc_sporadic(sc) && tcb->tcbSchedContext != NODE_STATE(ksCurSC)) {
+                            /* We know that the tcb can't have the current SC
+                             * as its own SC as this point as it should still be
+                             * associated with the current thread, or no thread.
+                             * This check is added here to reduce the cost of
+                             * proving this to be true as a short-term stop-gap. */
+                            /* Only unblock if the SC was donated from the
+                             * notification */
+                            refill_unblock_check(tcb->tcbSchedContext);
+                        }
+                    }
+#endif
                 }
 #endif /* CONFIG_VTX */
             } else {
@@ -17731,7 +20234,23 @@ sendSignal(notification_t *ntfnPtr, word_t badge)
 
         setThreadState(dest, ThreadState_Running);
         setRegister(dest, badgeRegister, badge);
-        possibleSwitchTo(dest);
+        MCS_DO_IF_SC(dest, ntfnPtr, {
+            possibleSwitchTo(dest);
+        })
+
+#ifdef CONFIG_KERNEL_MCS
+        if (sc_sporadic(dest->tcbSchedContext)) {
+            /* We know that the receiver can't have the current SC
+             * as its own SC as this point as it should still be
+             * associated with the current thread.
+             * This check is added here to reduce the cost of
+             * proving this to be true as a short-term stop-gap. */
+            assert(dest->tcbSchedContext != NODE_STATE(ksCurSC));
+            if (dest->tcbSchedContext != NODE_STATE(ksCurSC)) {
+                refill_unblock_check(dest->tcbSchedContext);
+            }
+        }
+#endif
         break;
     }
 
@@ -17747,8 +20266,7 @@ sendSignal(notification_t *ntfnPtr, word_t badge)
     }
 }
 
-void
-receiveSignal(tcb_t *thread, cap_t cap, bool_t isBlocking)
+void receiveSignal(tcb_t *thread, cap_t cap, bool_t isBlocking)
 {
     notification_t *ntfnPtr;
 
@@ -17773,6 +20291,10 @@ receiveSignal(tcb_t *thread, cap_t cap, bool_t isBlocking)
 
             notification_ptr_set_state(ntfnPtr, NtfnState_Waiting);
             ntfn_ptr_set_queue(ntfnPtr, ntfn_queue);
+
+#ifdef CONFIG_KERNEL_MCS
+            maybeReturnSchedContext(ntfnPtr, thread);
+#endif
         } else {
             doNBRecvFailedTransfer(thread);
         }
@@ -17785,12 +20307,19 @@ receiveSignal(tcb_t *thread, cap_t cap, bool_t isBlocking)
             thread, badgeRegister,
             notification_ptr_get_ntfnMsgIdentifier(ntfnPtr));
         notification_ptr_set_state(ntfnPtr, NtfnState_Idle);
+#ifdef CONFIG_KERNEL_MCS
+        maybeDonateSchedContext(thread, ntfnPtr);
+        // If the SC has been donated to the current thread (in a reply_recv, send_recv scenario) then
+        // we may need to perform refill_unblock_check if the SC is becoming activated.
+        if (thread->tcbSchedContext != NODE_STATE(ksCurSC) && sc_sporadic(thread->tcbSchedContext)) {
+            refill_unblock_check(thread->tcbSchedContext);
+        }
+#endif
         break;
     }
 }
 
-void
-cancelAllSignals(notification_t *ntfnPtr)
+void cancelAllSignals(notification_t *ntfnPtr)
 {
     if (notification_ptr_get_state(ntfnPtr) == NtfnState_Waiting) {
         tcb_t *thread = TCB_PTR(notification_ptr_get_ntfnQueue_head(ntfnPtr));
@@ -17802,14 +20331,28 @@ cancelAllSignals(notification_t *ntfnPtr)
         /* Set all waiting threads to Restart */
         for (; thread; thread = thread->tcbEPNext) {
             setThreadState(thread, ThreadState_Restart);
+#ifdef CONFIG_KERNEL_MCS
+            if (sc_sporadic(thread->tcbSchedContext)) {
+                /* We know that the thread can't have the current SC
+                 * as its own SC as this point as it should still be
+                 * associated with the current thread, or no thread.
+                 * This check is added here to reduce the cost of
+                 * proving this to be true as a short-term stop-gap. */
+                assert(thread->tcbSchedContext != NODE_STATE(ksCurSC));
+                if (thread->tcbSchedContext != NODE_STATE(ksCurSC)) {
+                    refill_unblock_check(thread->tcbSchedContext);
+                }
+            }
+            possibleSwitchTo(thread);
+#else
             SCHED_ENQUEUE(thread);
+#endif
         }
         rescheduleRequired();
     }
 }
 
-void
-cancelSignal(tcb_t *threadPtr, notification_t *ntfnPtr)
+void cancelSignal(tcb_t *threadPtr, notification_t *ntfnPtr)
 {
     tcb_queue_t ntfn_queue;
 
@@ -17830,8 +20373,7 @@ cancelSignal(tcb_t *threadPtr, notification_t *ntfnPtr)
     setThreadState(threadPtr, ThreadState_Inactive);
 }
 
-void
-completeSignal(notification_t *ntfnPtr, tcb_t *tcb)
+void completeSignal(notification_t *ntfnPtr, tcb_t *tcb)
 {
     word_t badge;
 
@@ -17839,31 +20381,44 @@ completeSignal(notification_t *ntfnPtr, tcb_t *tcb)
         badge = notification_ptr_get_ntfnMsgIdentifier(ntfnPtr);
         setRegister(tcb, badgeRegister, badge);
         notification_ptr_set_state(ntfnPtr, NtfnState_Idle);
+#ifdef CONFIG_KERNEL_MCS
+        maybeDonateSchedContext(tcb, ntfnPtr);
+        if (sc_sporadic(tcb->tcbSchedContext)) {
+            sched_context_t *sc = SC_PTR(notification_ptr_get_ntfnSchedContext(ntfnPtr));
+            if (tcb->tcbSchedContext == sc && tcb->tcbSchedContext != NODE_STATE(ksCurSC)) {
+                /* We know that the tcb can't have the current SC
+                 * as its own SC as this point as it should still be
+                 * associated with the current thread, or no thread.
+                 * This check is added here to reduce the cost of
+                 * proving this to be true as a short-term stop-gap. */
+                /* Only unblock if the SC was donated from the
+                 * notification */
+                refill_unblock_check(tcb->tcbSchedContext);
+            }
+        }
+#endif
     } else {
         fail("tried to complete signal with inactive notification object");
     }
 }
 
-static inline void
-doUnbindNotification(notification_t *ntfnPtr, tcb_t *tcbptr)
+static inline void doUnbindNotification(notification_t *ntfnPtr, tcb_t *tcbptr)
 {
     notification_ptr_set_ntfnBoundTCB(ntfnPtr, (word_t) 0);
     tcbptr->tcbBoundNotification = NULL;
 }
 
-void
-unbindMaybeNotification(notification_t *ntfnPtr)
+void unbindMaybeNotification(notification_t *ntfnPtr)
 {
     tcb_t *boundTCB;
-    boundTCB = (tcb_t*)notification_ptr_get_ntfnBoundTCB(ntfnPtr);
+    boundTCB = (tcb_t *)notification_ptr_get_ntfnBoundTCB(ntfnPtr);
 
     if (boundTCB) {
         doUnbindNotification(ntfnPtr, boundTCB);
     }
 }
 
-void
-unbindNotification(tcb_t *tcb)
+void unbindNotification(tcb_t *tcb)
 {
     notification_t *ntfnPtr;
     ntfnPtr = tcb->tcbBoundNotification;
@@ -17873,22 +20428,26 @@ unbindNotification(tcb_t *tcb)
     }
 }
 
-void
-bindNotification(tcb_t *tcb, notification_t *ntfnPtr)
+void bindNotification(tcb_t *tcb, notification_t *ntfnPtr)
 {
     notification_ptr_set_ntfnBoundTCB(ntfnPtr, (word_t)tcb);
     tcb->tcbBoundNotification = ntfnPtr;
 }
 
-
+#ifdef CONFIG_KERNEL_MCS
+void reorderNTFN(notification_t *ntfnPtr, tcb_t *thread)
+{
+    tcb_queue_t queue = ntfn_ptr_get_queue(ntfnPtr);
+    queue = tcbEPDequeue(thread, queue);
+    queue = tcbEPAppend(thread, queue);
+    ntfn_ptr_set_queue(ntfnPtr, queue);
+}
+#endif
+#line 1 "/Users/payas/git/seL4/src/object/objecttype.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <assert.h>
@@ -17904,6 +20463,10 @@ bindNotification(tcb_t *tcb, notification_t *ntfnPtr)
 #include <object/endpoint.h>
 #include <object/cnode.h>
 #include <object/interrupt.h>
+#ifdef CONFIG_KERNEL_MCS
+#include <object/schedcontext.h>
+#include <object/schedcontrol.h>
+#endif
 #include <object/tcb.h>
 #include <object/untyped.h>
 #include <model/statedata.h>
@@ -17929,6 +20492,12 @@ word_t getObjectSize(word_t t, word_t userObjSize)
             return seL4_SlotBits + userObjSize;
         case seL4_UntypedObject:
             return userObjSize;
+#ifdef CONFIG_KERNEL_MCS
+        case seL4_SchedContextObject:
+            return userObjSize;
+        case seL4_ReplyObject:
+            return seL4_ReplyBits;
+#endif
         default:
             fail("Invalid object type");
             return 0;
@@ -17936,8 +20505,7 @@ word_t getObjectSize(word_t t, word_t userObjSize)
     }
 }
 
-deriveCap_ret_t
-deriveCap(cte_t *slot, cap_t cap)
+deriveCap_ret_t deriveCap(cte_t *slot, cap_t cap)
 {
     deriveCap_ret_t ret;
 
@@ -17965,11 +20533,12 @@ deriveCap(cte_t *slot, cap_t cap)
         }
         break;
 
+#ifndef CONFIG_KERNEL_MCS
     case cap_reply_cap:
         ret.status = EXCEPTION_NONE;
         ret.cap = cap_null_cap_new();
         break;
-
+#endif
     default:
         ret.status = EXCEPTION_NONE;
         ret.cap = cap;
@@ -17978,8 +20547,7 @@ deriveCap(cte_t *slot, cap_t cap)
     return ret;
 }
 
-finaliseCap_ret_t
-finaliseCap(cap_t cap, bool_t final, bool_t exposed)
+finaliseCap_ret_t finaliseCap(cap_t cap, bool_t final, bool_t exposed)
 {
     finaliseCap_ret_t fc_ret;
 
@@ -18000,7 +20568,9 @@ finaliseCap(cap_t cap, bool_t final, bool_t exposed)
     case cap_notification_cap:
         if (final) {
             notification_t *ntfn = NTFN_PTR(cap_notification_cap_get_capNtfnPtr(cap));
-
+#ifdef CONFIG_KERNEL_MCS
+            schedContext_unbindNtfn(SC_PTR(notification_ptr_get_ntfnSchedContext(ntfn)));
+#endif
             unbindMaybeNotification(ntfn);
             cancelAllSignals(ntfn);
         }
@@ -18009,6 +20579,26 @@ finaliseCap(cap_t cap, bool_t final, bool_t exposed)
         return fc_ret;
 
     case cap_reply_cap:
+#ifdef CONFIG_KERNEL_MCS
+        if (final) {
+            reply_t *reply = REPLY_PTR(cap_reply_cap_get_capReplyPtr(cap));
+            if (reply && reply->replyTCB) {
+                switch (thread_state_get_tsType(reply->replyTCB->tcbState)) {
+                case ThreadState_BlockedOnReply:
+                    reply_remove(reply, reply->replyTCB);
+                    break;
+                case ThreadState_BlockedOnReceive:
+                    cancelIPC(reply->replyTCB);
+                    break;
+                default:
+                    fail("Invalid tcb state");
+                }
+            }
+        }
+        fc_ret.remainder = cap_null_cap_new();
+        fc_ret.cleanupInfo = cap_null_cap_new();
+        return fc_ret;
+#endif
     case cap_null_cap:
     case cap_domain_cap:
         fc_ret.remainder = cap_null_cap_new();
@@ -18044,6 +20634,15 @@ finaliseCap(cap_t cap, bool_t final, bool_t exposed)
             SMP_COND_STATEMENT(remoteTCBStall(tcb);)
             cte_ptr = TCB_PTR_CTE_PTR(tcb, tcbCTable);
             unbindNotification(tcb);
+#ifdef CONFIG_KERNEL_MCS
+            sched_context_t *sc = SC_PTR(tcb->tcbSchedContext);
+            if (sc) {
+                schedContext_unbindTCB(sc, tcb);
+                if (sc->scYieldFrom) {
+                    schedContext_completeYieldTo(sc->scYieldFrom);
+                }
+            }
+#endif
             suspend(tcb);
 #ifdef CONFIG_DEBUG_BUILD
             tcbDebugRemove(tcb);
@@ -18061,6 +20660,29 @@ finaliseCap(cap_t cap, bool_t final, bool_t exposed)
         break;
     }
 
+#ifdef CONFIG_KERNEL_MCS
+    case cap_sched_context_cap:
+        if (final) {
+            sched_context_t *sc = SC_PTR(cap_sched_context_cap_get_capSCPtr(cap));
+            schedContext_unbindAllTCBs(sc);
+            schedContext_unbindNtfn(sc);
+            if (sc->scReply) {
+                assert(call_stack_get_isHead(sc->scReply->replyNext));
+                sc->scReply->replyNext = call_stack_new(0, false);
+                sc->scReply = NULL;
+            }
+            if (sc->scYieldFrom) {
+                schedContext_completeYieldTo(sc->scYieldFrom);
+            }
+            /* mark the sc as no longer valid */
+            sc->scRefillMax = 0;
+            fc_ret.remainder = cap_null_cap_new();
+            fc_ret.cleanupInfo = cap_null_cap_new();
+            return fc_ret;
+        }
+        break;
+#endif
+
     case cap_zombie_cap:
         fc_ret.remainder = cap;
         fc_ret.cleanupInfo = cap_null_cap_new();
@@ -18068,7 +20690,7 @@ finaliseCap(cap_t cap, bool_t final, bool_t exposed)
 
     case cap_irq_handler_cap:
         if (final) {
-            irq_t irq = cap_irq_handler_cap_get_capIRQ(cap);
+            irq_t irq = IDX_TO_IRQT(cap_irq_handler_cap_get_capIRQ(cap));
 
             deletingIRQHandler(irq);
 
@@ -18084,13 +20706,13 @@ finaliseCap(cap_t cap, bool_t final, bool_t exposed)
     return fc_ret;
 }
 
-bool_t CONST
-hasCancelSendRights(cap_t cap)
+bool_t CONST hasCancelSendRights(cap_t cap)
 {
     switch (cap_get_capType(cap)) {
     case cap_endpoint_cap:
         return cap_endpoint_cap_get_capCanSend(cap) &&
                cap_endpoint_cap_get_capCanReceive(cap) &&
+               cap_endpoint_cap_get_capCanGrantReply(cap) &&
                cap_endpoint_cap_get_capCanGrant(cap);
 
     default:
@@ -18098,8 +20720,7 @@ hasCancelSendRights(cap_t cap)
     }
 }
 
-bool_t CONST
-sameRegionAs(cap_t cap_a, cap_t cap_b)
+bool_t CONST sameRegionAs(cap_t cap_a, cap_t cap_b)
 {
     switch (cap_get_capType(cap_a)) {
     case cap_untyped_cap:
@@ -18148,8 +20769,13 @@ sameRegionAs(cap_t cap_a, cap_t cap_b)
 
     case cap_reply_cap:
         if (cap_get_capType(cap_b) == cap_reply_cap) {
+#ifdef CONFIG_KERNEL_MCS
+            return cap_reply_cap_get_capReplyPtr(cap_a) ==
+                   cap_reply_cap_get_capReplyPtr(cap_b);
+#else
             return cap_reply_cap_get_capTCBPtr(cap_a) ==
                    cap_reply_cap_get_capTCBPtr(cap_b);
+#endif
         }
         break;
 
@@ -18161,21 +20787,36 @@ sameRegionAs(cap_t cap_a, cap_t cap_b)
 
     case cap_irq_control_cap:
         if (cap_get_capType(cap_b) == cap_irq_control_cap ||
-                cap_get_capType(cap_b) == cap_irq_handler_cap) {
+            cap_get_capType(cap_b) == cap_irq_handler_cap) {
             return true;
         }
         break;
 
     case cap_irq_handler_cap:
         if (cap_get_capType(cap_b) == cap_irq_handler_cap) {
-            return (irq_t)cap_irq_handler_cap_get_capIRQ(cap_a) ==
-                   (irq_t)cap_irq_handler_cap_get_capIRQ(cap_b);
+            return (word_t)cap_irq_handler_cap_get_capIRQ(cap_a) ==
+                   (word_t)cap_irq_handler_cap_get_capIRQ(cap_b);
         }
         break;
 
+#ifdef CONFIG_KERNEL_MCS
+    case cap_sched_context_cap:
+        if (cap_get_capType(cap_b) == cap_sched_context_cap) {
+            return (cap_sched_context_cap_get_capSCPtr(cap_a) ==
+                    cap_sched_context_cap_get_capSCPtr(cap_b)) &&
+                   (cap_sched_context_cap_get_capSCSizeBits(cap_a) ==
+                    cap_sched_context_cap_get_capSCSizeBits(cap_b));
+        }
+        break;
+    case cap_sched_control_cap:
+        if (cap_get_capType(cap_b) == cap_sched_control_cap) {
+            return true;
+        }
+        break;
+#endif
     default:
         if (isArchCap(cap_a) &&
-                isArchCap(cap_b)) {
+            isArchCap(cap_b)) {
             return Arch_sameRegionAs(cap_a, cap_b);
         }
         break;
@@ -18184,14 +20825,13 @@ sameRegionAs(cap_t cap_a, cap_t cap_b)
     return false;
 }
 
-bool_t CONST
-sameObjectAs(cap_t cap_a, cap_t cap_b)
+bool_t CONST sameObjectAs(cap_t cap_a, cap_t cap_b)
 {
     if (cap_get_capType(cap_a) == cap_untyped_cap) {
         return false;
     }
     if (cap_get_capType(cap_a) == cap_irq_control_cap &&
-            cap_get_capType(cap_b) == cap_irq_handler_cap) {
+        cap_get_capType(cap_b) == cap_irq_handler_cap) {
         return false;
     }
     if (isArchCap(cap_a) && isArchCap(cap_b)) {
@@ -18200,8 +20840,7 @@ sameObjectAs(cap_t cap_a, cap_t cap_b)
     return sameRegionAs(cap_a, cap_b);
 }
 
-cap_t CONST
-updateCapData(bool_t preserve, word_t newData, cap_t cap)
+cap_t CONST updateCapData(bool_t preserve, word_t newData, cap_t cap)
 {
     if (isArchCap(cap)) {
         return Arch_updateCapData(preserve, newData, cap);
@@ -18247,8 +20886,7 @@ updateCapData(bool_t preserve, word_t newData, cap_t cap)
     }
 }
 
-cap_t CONST
-maskCapRights(seL4_CapRights_t cap_rights, cap_t cap)
+cap_t CONST maskCapRights(seL4_CapRights_t cap_rights, cap_t cap)
 {
     if (isArchCap(cap)) {
         return Arch_maskCapRights(cap_rights, cap);
@@ -18259,11 +20897,14 @@ maskCapRights(seL4_CapRights_t cap_rights, cap_t cap)
     case cap_domain_cap:
     case cap_cnode_cap:
     case cap_untyped_cap:
-    case cap_reply_cap:
     case cap_irq_control_cap:
     case cap_irq_handler_cap:
     case cap_zombie_cap:
     case cap_thread_cap:
+#ifdef CONFIG_KERNEL_MCS
+    case cap_sched_context_cap:
+    case cap_sched_control_cap:
+#endif
         return cap;
 
     case cap_endpoint_cap: {
@@ -18278,6 +20919,9 @@ maskCapRights(seL4_CapRights_t cap_rights, cap_t cap)
         new_cap = cap_endpoint_cap_set_capCanGrant(
                       new_cap, cap_endpoint_cap_get_capCanGrant(cap) &
                       seL4_CapRights_get_capAllowGrant(cap_rights));
+        new_cap = cap_endpoint_cap_set_capCanGrantReply(
+                      new_cap, cap_endpoint_cap_get_capCanGrantReply(cap) &
+                      seL4_CapRights_get_capAllowGrantReply(cap_rights));
 
         return new_cap;
     }
@@ -18294,14 +20938,22 @@ maskCapRights(seL4_CapRights_t cap_rights, cap_t cap)
 
         return new_cap;
     }
+    case cap_reply_cap: {
+        cap_t new_cap;
+
+        new_cap = cap_reply_cap_set_capReplyCanGrant(
+                      cap, cap_reply_cap_get_capReplyCanGrant(cap) &
+                      seL4_CapRights_get_capAllowGrant(cap_rights));
+        return new_cap;
+    }
+
 
     default:
         fail("Invalid cap type"); /* Sentinel for invalid enums */
     }
 }
 
-cap_t
-createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMemory)
+cap_t createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMemory)
 {
     /* Handle architecture-specific objects. */
     if (t >= (object_t) seL4_NonArchObjectTypeCount) {
@@ -18320,16 +20972,18 @@ createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMemory)
         /* Setup non-zero parts of the TCB. */
 
         Arch_initContext(&tcb->tcbArch.tcbContext);
+#ifndef CONFIG_KERNEL_MCS
         tcb->tcbTimeSlice = CONFIG_TIME_SLICE;
+#endif
         tcb->tcbDomain = ksCurDomain;
-
+#ifndef CONFIG_KERNEL_MCS
         /* Initialize the new TCB to the current core */
         SMP_COND_STATEMENT(tcb->tcbAffinity = getCurrentCPUIndex());
-
+#endif
 #ifdef CONFIG_DEBUG_BUILD
-        strlcpy(tcb->tcbName, "child of: '", TCB_NAME_LENGTH);
-        strlcat(tcb->tcbName, NODE_STATE(ksCurThread)->tcbName, TCB_NAME_LENGTH);
-        strlcat(tcb->tcbName, "'", TCB_NAME_LENGTH);
+        strlcpy(TCB_PTR_DEBUG_PTR(tcb)->tcbName, "child of: '", TCB_NAME_LENGTH);
+        strlcat(TCB_PTR_DEBUG_PTR(tcb)->tcbName, TCB_PTR_DEBUG_PTR(NODE_STATE(ksCurThread))->tcbName, TCB_NAME_LENGTH);
+        strlcat(TCB_PTR_DEBUG_PTR(tcb)->tcbName, "'", TCB_NAME_LENGTH);
         tcbDebugAppend(tcb);
 #endif /* CONFIG_DEBUG_BUILD */
 
@@ -18339,7 +20993,7 @@ createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMemory)
     case seL4_EndpointObject:
         /** AUXUPD: "(True, ptr_retyp
           (Ptr (ptr_val \<acute>regionBase) :: endpoint_C ptr))" */
-        return cap_endpoint_cap_new(0, true, true, true,
+        return cap_endpoint_cap_new(0, true, true, true, true,
                                     EP_REF(regionBase));
 
     case seL4_NotificationObject:
@@ -18363,14 +21017,32 @@ createObject(object_t t, void *regionBase, word_t userSize, bool_t deviceMemory)
          */
         return cap_untyped_cap_new(0, !!deviceMemory, userSize, WORD_REF(regionBase));
 
+#ifdef CONFIG_KERNEL_MCS
+    case seL4_SchedContextObject:
+        /** AUXUPD:
+            "(True,
+              ptr_arr_retyps (refills_len (unat \<acute>userSize)
+                                          (size_of TYPE(sched_context_C))
+                                          (size_of TYPE(refill_C)))
+                             (Ptr ((ptr_val \<acute>regionBase) +
+                                   word_of_nat (size_of TYPE(sched_context_C))) :: refill_C ptr)
+              \<circ> ptr_retyp (Ptr (ptr_val \<acute>regionBase) :: sched_context_C ptr))" */
+        /** GHOSTUPD: "(True, gs_new_sc_size (ptr_val \<acute>regionBase) (unat \<acute>userSize))" */
+        return cap_sched_context_cap_new(SC_REF(regionBase), userSize);
+
+    case seL4_ReplyObject:
+        /** AUXUPD: "(True, ptr_retyp (Ptr (ptr_val \<acute>regionBase) :: reply_C ptr))" */
+        return cap_reply_cap_new(REPLY_REF(regionBase), true);
+#endif
+
     default:
         fail("Invalid object type");
     }
 }
 
-void
-createNewObjects(object_t t, cte_t *parent, slot_range_t slots,
-                 void *regionBase, word_t userSize, bool_t deviceMemory)
+void createNewObjects(object_t t, cte_t *parent,
+                      cte_t *destCNode, word_t destOffset, word_t destLength,
+                      void *regionBase, word_t userSize, bool_t deviceMemory)
 {
     word_t objectSize;
     void *nextFreeArea;
@@ -18379,33 +21051,39 @@ createNewObjects(object_t t, cte_t *parent, slot_range_t slots,
 
     /* ghost check that we're visiting less bytes than the max object size */
     objectSize = getObjectSize(t, userSize);
-    totalObjectSize = slots.length << objectSize;
+    totalObjectSize = destLength << objectSize;
     /** GHOSTUPD: "(gs_get_assn cap_get_capSizeBits_'proc \<acute>ghost'state = 0
         \<or> \<acute>totalObjectSize <= gs_get_assn cap_get_capSizeBits_'proc \<acute>ghost'state, id)" */
 
     /* Create the objects. */
     nextFreeArea = regionBase;
-    for (i = 0; i < slots.length; i++) {
+    for (i = 0; i < destLength; i++) {
         /* Create the object. */
         /** AUXUPD: "(True, typ_region_bytes (ptr_val \<acute> nextFreeArea + ((\<acute> i) << unat (\<acute> objectSize))) (unat (\<acute> objectSize)))" */
         cap_t cap = createObject(t, (void *)((word_t)nextFreeArea + (i << objectSize)), userSize, deviceMemory);
 
         /* Insert the cap into the user's cspace. */
-        insertNewCap(parent, &slots.cnode[slots.offset + i], cap);
+        insertNewCap(parent, &destCNode[destOffset + i], cap);
 
         /* Move along to the next region of memory. been merged into a formula of i */
     }
 }
 
-exception_t
-decodeInvocation(word_t invLabel, word_t length,
-                 cptr_t capIndex, cte_t *slot, cap_t cap,
-                 extra_caps_t excaps, bool_t block, bool_t call,
-                 word_t *buffer)
+#ifdef CONFIG_KERNEL_MCS
+exception_t decodeInvocation(word_t invLabel, word_t length,
+                             cptr_t capIndex, cte_t *slot, cap_t cap,
+                             bool_t block, bool_t call,
+                             bool_t canDonate, bool_t firstPhase, word_t *buffer)
+#else
+exception_t decodeInvocation(word_t invLabel, word_t length,
+                             cptr_t capIndex, cte_t *slot, cap_t cap,
+                             bool_t block, bool_t call,
+                             word_t *buffer)
+#endif
 {
     if (isArchCap(cap)) {
         return Arch_decodeInvocation(invLabel, length, capIndex,
-                                     slot, cap, excaps, call, buffer);
+                                     slot, cap, call, buffer);
     }
 
     switch (cap_get_capType(cap)) {
@@ -18431,10 +21109,19 @@ decodeInvocation(word_t invLabel, word_t length,
         }
 
         setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+#ifdef CONFIG_KERNEL_MCS
         return performInvocation_Endpoint(
                    EP_PTR(cap_endpoint_cap_get_capEPPtr(cap)),
                    cap_endpoint_cap_get_capEPBadge(cap),
-                   cap_endpoint_cap_get_capCanGrant(cap), block, call);
+                   cap_endpoint_cap_get_capCanGrant(cap),
+                   cap_endpoint_cap_get_capCanGrantReply(cap), block, call, canDonate);
+#else
+        return performInvocation_Endpoint(
+                   EP_PTR(cap_endpoint_cap_get_capEPPtr(cap)),
+                   cap_endpoint_cap_get_capEPBadge(cap),
+                   cap_endpoint_cap_get_capCanGrant(cap),
+                   cap_endpoint_cap_get_capCanGrantReply(cap), block, call);
+#endif
 
     case cap_notification_cap: {
         if (unlikely(!cap_notification_cap_get_capNtfnCanSend(cap))) {
@@ -18451,6 +21138,14 @@ decodeInvocation(word_t invLabel, word_t length,
                    cap_notification_cap_get_capNtfnBadge(cap));
     }
 
+#ifdef CONFIG_KERNEL_MCS
+    case cap_reply_cap:
+        setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+        return performInvocation_Reply(
+                   NODE_STATE(ksCurThread),
+                   REPLY_PTR(cap_reply_cap_get_capReplyPtr(cap)),
+                   cap_reply_cap_get_capReplyCanGrant(cap));
+#else
     case cap_reply_cap:
         if (unlikely(cap_reply_cap_get_capReplyMaster(cap))) {
             userError("Attempted to invoke an invalid reply cap #%lu.",
@@ -18462,68 +21157,323 @@ decodeInvocation(word_t invLabel, word_t length,
 
         setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
         return performInvocation_Reply(
-                   TCB_PTR(cap_reply_cap_get_capTCBPtr(cap)), slot);
+                   TCB_PTR(cap_reply_cap_get_capTCBPtr(cap)), slot,
+                   cap_reply_cap_get_capReplyCanGrant(cap));
+
+#endif
 
     case cap_thread_cap:
-        return decodeTCBInvocation(invLabel, length, cap,
-                                   slot, excaps, call, buffer);
+#ifdef CONFIG_KERNEL_MCS
+        if (unlikely(firstPhase)) {
+            userError("Cannot invoke thread capabilities in the first phase of an invocation");
+            current_syscall_error.type = seL4_InvalidCapability;
+            current_syscall_error.invalidCapNumber = 0;
+            return EXCEPTION_SYSCALL_ERROR;
+        }
+#endif
+        return decodeTCBInvocation(invLabel, length, cap, slot, call, buffer);
 
     case cap_domain_cap:
-        return decodeDomainInvocation(invLabel, length, excaps, buffer);
+#ifdef CONFIG_KERNEL_MCS
+        if (unlikely(firstPhase)) {
+            userError("Cannot invoke domain capabilities in the first phase of an invocation");
+            current_syscall_error.type = seL4_InvalidCapability;
+            current_syscall_error.invalidCapNumber = 0;
+            return EXCEPTION_SYSCALL_ERROR;
+        }
+#endif
+        return decodeDomainInvocation(invLabel, length, buffer);
 
     case cap_cnode_cap:
-        return decodeCNodeInvocation(invLabel, length, cap, excaps, buffer);
+#ifdef CONFIG_KERNEL_MCS
+        if (unlikely(firstPhase)) {
+            userError("Cannot invoke cnode capabilities in the first phase of an invocation");
+            current_syscall_error.type = seL4_InvalidCapability;
+            current_syscall_error.invalidCapNumber = 0;
+            return EXCEPTION_SYSCALL_ERROR;
+        }
+#endif
+        return decodeCNodeInvocation(invLabel, length, cap, buffer);
 
     case cap_untyped_cap:
-        return decodeUntypedInvocation(invLabel, length, slot, cap, excaps,
-                                       call, buffer);
+        return decodeUntypedInvocation(invLabel, length, slot, cap, call, buffer);
 
     case cap_irq_control_cap:
-        return decodeIRQControlInvocation(invLabel, length, slot,
-                                          excaps, buffer);
+        return decodeIRQControlInvocation(invLabel, length, slot, buffer);
 
     case cap_irq_handler_cap:
         return decodeIRQHandlerInvocation(invLabel,
-                                          cap_irq_handler_cap_get_capIRQ(cap), excaps);
+                                          IDX_TO_IRQT(cap_irq_handler_cap_get_capIRQ(cap)));
 
+#ifdef CONFIG_KERNEL_MCS
+    case cap_sched_control_cap:
+        if (unlikely(firstPhase)) {
+            userError("Cannot invoke sched control capabilities in the first phase of an invocation");
+            current_syscall_error.type = seL4_InvalidCapability;
+            current_syscall_error.invalidCapNumber = 0;
+            return EXCEPTION_SYSCALL_ERROR;
+        }
+        return decodeSchedControlInvocation(invLabel, cap, length, buffer);
+
+    case cap_sched_context_cap:
+        if (unlikely(firstPhase)) {
+            userError("Cannot invoke sched context capabilities in the first phase of an invocation");
+            current_syscall_error.type = seL4_InvalidCapability;
+            current_syscall_error.invalidCapNumber = 0;
+            return EXCEPTION_SYSCALL_ERROR;
+        }
+        return decodeSchedContextInvocation(invLabel, cap, buffer);
+#endif
     default:
         fail("Invalid cap type");
     }
 }
 
-exception_t
-performInvocation_Endpoint(endpoint_t *ep, word_t badge,
-                           bool_t canGrant, bool_t block,
-                           bool_t call)
+#ifdef CONFIG_KERNEL_MCS
+exception_t performInvocation_Endpoint(endpoint_t *ep, word_t badge,
+                                       bool_t canGrant, bool_t canGrantReply,
+                                       bool_t block, bool_t call, bool_t canDonate)
 {
-    sendIPC(block, call, badge, canGrant, NODE_STATE(ksCurThread), ep);
+    sendIPC(block, call, badge, canGrant, canGrantReply, canDonate, NODE_STATE(ksCurThread), ep);
 
     return EXCEPTION_NONE;
 }
+#else
+exception_t performInvocation_Endpoint(endpoint_t *ep, word_t badge,
+                                       bool_t canGrant, bool_t canGrantReply,
+                                       bool_t block, bool_t call)
+{
+    sendIPC(block, call, badge, canGrant, canGrantReply, NODE_STATE(ksCurThread), ep);
 
-exception_t
-performInvocation_Notification(notification_t *ntfn, word_t badge)
+    return EXCEPTION_NONE;
+}
+#endif
+
+exception_t performInvocation_Notification(notification_t *ntfn, word_t badge)
 {
     sendSignal(ntfn, badge);
 
     return EXCEPTION_NONE;
 }
 
-exception_t
-performInvocation_Reply(tcb_t *thread, cte_t *slot)
+#ifdef CONFIG_KERNEL_MCS
+exception_t performInvocation_Reply(tcb_t *thread, reply_t *reply, bool_t canGrant)
 {
-    doReplyTransfer(NODE_STATE(ksCurThread), thread, slot);
+    doReplyTransfer(thread, reply, canGrant);
     return EXCEPTION_NONE;
 }
+#else
+exception_t performInvocation_Reply(tcb_t *thread, cte_t *slot, bool_t canGrant)
+{
+    doReplyTransfer(NODE_STATE(ksCurThread), thread, slot, canGrant);
+    return EXCEPTION_NONE;
+}
+#endif
 
+word_t CONST cap_get_capSizeBits(cap_t cap)
+{
+
+    cap_tag_t ctag;
+
+    ctag = cap_get_capType(cap);
+
+    switch (ctag) {
+    case cap_untyped_cap:
+        return cap_untyped_cap_get_capBlockSize(cap);
+
+    case cap_endpoint_cap:
+        return seL4_EndpointBits;
+
+    case cap_notification_cap:
+        return seL4_NotificationBits;
+
+    case cap_cnode_cap:
+        return cap_cnode_cap_get_capCNodeRadix(cap) + seL4_SlotBits;
+
+    case cap_thread_cap:
+        return seL4_TCBBits;
+
+    case cap_zombie_cap: {
+        word_t type = cap_zombie_cap_get_capZombieType(cap);
+        if (type == ZombieType_ZombieTCB) {
+            return seL4_TCBBits;
+        }
+        return ZombieType_ZombieCNode(type) + seL4_SlotBits;
+    }
+
+    case cap_null_cap:
+        return 0;
+
+    case cap_domain_cap:
+        return 0;
+
+    case cap_reply_cap:
+#ifdef CONFIG_KERNEL_MCS
+        return seL4_ReplyBits;
+#else
+        return 0;
+#endif
+
+    case cap_irq_control_cap:
+#ifdef CONFIG_KERNEL_MCS
+    case cap_sched_control_cap:
+#endif
+        return 0;
+
+    case cap_irq_handler_cap:
+        return 0;
+
+#ifdef CONFIG_KERNEL_MCS
+    case cap_sched_context_cap:
+        return cap_sched_context_cap_get_capSCSizeBits(cap);
+#endif
+
+    default:
+        return cap_get_archCapSizeBits(cap);
+    }
+
+}
+
+/* Returns whether or not this capability has memory associated
+ * with it or not. Referring to this as 'being physical' is to
+ * match up with the Haskell and abstract specifications */
+bool_t CONST cap_get_capIsPhysical(cap_t cap)
+{
+    cap_tag_t ctag;
+
+    ctag = cap_get_capType(cap);
+
+    switch (ctag) {
+    case cap_untyped_cap:
+        return true;
+
+    case cap_endpoint_cap:
+        return true;
+
+    case cap_notification_cap:
+        return true;
+
+    case cap_cnode_cap:
+        return true;
+
+    case cap_thread_cap:
+#ifdef CONFIG_KERNEL_MCS
+    case cap_sched_context_cap:
+#endif
+        return true;
+
+    case cap_zombie_cap:
+        return true;
+
+    case cap_domain_cap:
+        return false;
+
+    case cap_reply_cap:
+#ifdef CONFIG_KERNEL_MCS
+        return true;
+#else
+        return false;
+#endif
+
+    case cap_irq_control_cap:
+#ifdef CONFIG_KERNEL_MCS
+    case cap_sched_control_cap:
+#endif
+        return false;
+
+    case cap_irq_handler_cap:
+        return false;
+
+    default:
+        return cap_get_archCapIsPhysical(cap);
+    }
+}
+
+void *CONST cap_get_capPtr(cap_t cap)
+{
+    cap_tag_t ctag;
+
+    ctag = cap_get_capType(cap);
+
+    switch (ctag) {
+    case cap_untyped_cap:
+        return WORD_PTR(cap_untyped_cap_get_capPtr(cap));
+
+    case cap_endpoint_cap:
+        return EP_PTR(cap_endpoint_cap_get_capEPPtr(cap));
+
+    case cap_notification_cap:
+        return NTFN_PTR(cap_notification_cap_get_capNtfnPtr(cap));
+
+    case cap_cnode_cap:
+        return CTE_PTR(cap_cnode_cap_get_capCNodePtr(cap));
+
+    case cap_thread_cap:
+        return TCB_PTR_CTE_PTR(cap_thread_cap_get_capTCBPtr(cap), 0);
+
+    case cap_zombie_cap:
+        return CTE_PTR(cap_zombie_cap_get_capZombiePtr(cap));
+
+    case cap_domain_cap:
+        return NULL;
+
+    case cap_reply_cap:
+#ifdef CONFIG_KERNEL_MCS
+        return REPLY_PTR(cap_reply_cap_get_capReplyPtr(cap));
+#else
+        return NULL;
+#endif
+
+    case cap_irq_control_cap:
+#ifdef CONFIG_KERNEL_MCS
+    case cap_sched_control_cap:
+#endif
+        return NULL;
+
+    case cap_irq_handler_cap:
+        return NULL;
+
+#ifdef CONFIG_KERNEL_MCS
+    case cap_sched_context_cap:
+        return SC_PTR(cap_sched_context_cap_get_capSCPtr(cap));
+#endif
+
+    default:
+        return cap_get_archCapPtr(cap);
+
+    }
+}
+
+bool_t CONST isCapRevocable(cap_t derivedCap, cap_t srcCap)
+{
+    if (isArchCap(derivedCap)) {
+        return Arch_isCapRevocable(derivedCap, srcCap);
+    }
+    switch (cap_get_capType(derivedCap)) {
+    case cap_endpoint_cap:
+        return (cap_endpoint_cap_get_capEPBadge(derivedCap) !=
+                cap_endpoint_cap_get_capEPBadge(srcCap));
+
+    case cap_notification_cap:
+        return (cap_notification_cap_get_capNtfnBadge(derivedCap) !=
+                cap_notification_cap_get_capNtfnBadge(srcCap));
+
+    case cap_irq_handler_cap:
+        return (cap_get_capType(srcCap) ==
+                cap_irq_control_cap);
+
+    case cap_untyped_cap:
+        return true;
+
+    default:
+        return false;
+    }
+}
+#line 1 "/Users/payas/git/seL4/src/object/tcb.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -18531,11 +21481,14 @@ performInvocation_Reply(tcb_t *thread, cte_t *slot)
 #include <api/failures.h>
 #include <api/invocation.h>
 #include <api/syscall.h>
-#include <api/shared_types.h>
+#include <sel4/shared_types.h>
 #include <machine/io.h>
 #include <object/structures.h>
 #include <object/objecttype.h>
 #include <object/cnode.h>
+#ifdef CONFIG_KERNEL_MCS
+#include <object/schedcontext.h>
+#endif
 #include <object/tcb.h>
 #include <kernel/cspace.h>
 #include <kernel/thread.h>
@@ -18548,8 +21501,7 @@ performInvocation_Reply(tcb_t *thread, cte_t *slot)
 
 #define NULL_PRIO 0
 
-static exception_t
-checkPrio(prio_t prio, tcb_t *auth)
+static exception_t checkPrio(prio_t prio, tcb_t *auth)
 {
     prio_t mcp;
 
@@ -18569,8 +21521,7 @@ checkPrio(prio_t prio, tcb_t *auth)
     return EXCEPTION_NONE;
 }
 
-static inline void
-addToBitmap(word_t cpu, word_t dom, word_t prio)
+static inline void addToBitmap(word_t cpu, word_t dom, word_t prio)
 {
     word_t l1index;
     word_t l1index_inverted;
@@ -18586,8 +21537,7 @@ addToBitmap(word_t cpu, word_t dom, word_t prio)
     NODE_STATE_ON_CORE(ksReadyQueuesL2Bitmap[dom][l1index_inverted], cpu) |= BIT(prio & MASK(wordRadix));
 }
 
-static inline void
-removeFromBitmap(word_t cpu, word_t dom, word_t prio)
+static inline void removeFromBitmap(word_t cpu, word_t dom, word_t prio)
 {
     word_t l1index;
     word_t l1index_inverted;
@@ -18601,9 +21551,13 @@ removeFromBitmap(word_t cpu, word_t dom, word_t prio)
 }
 
 /* Add TCB to the head of a scheduler queue */
-void
-tcbSchedEnqueue(tcb_t *tcb)
+void tcbSchedEnqueue(tcb_t *tcb)
 {
+#ifdef CONFIG_KERNEL_MCS
+    assert(isSchedulable(tcb));
+    assert(refill_sufficient(tcb->tcbSchedContext, 0));
+#endif
+
     if (!thread_state_get_tcbQueued(tcb->tcbState)) {
         tcb_queue_t queue;
         dom_t dom;
@@ -18632,9 +21586,13 @@ tcbSchedEnqueue(tcb_t *tcb)
 }
 
 /* Add TCB to the end of a scheduler queue */
-void
-tcbSchedAppend(tcb_t *tcb)
+void tcbSchedAppend(tcb_t *tcb)
 {
+#ifdef CONFIG_KERNEL_MCS
+    assert(isSchedulable(tcb));
+    assert(refill_sufficient(tcb->tcbSchedContext, 0));
+    assert(refill_ready(tcb->tcbSchedContext));
+#endif
     if (!thread_state_get_tcbQueued(tcb->tcbState)) {
         tcb_queue_t queue;
         dom_t dom;
@@ -18663,8 +21621,7 @@ tcbSchedAppend(tcb_t *tcb)
 }
 
 /* Remove TCB from a scheduler queue */
-void
-tcbSchedDequeue(tcb_t *tcb)
+void tcbSchedDequeue(tcb_t *tcb)
 {
     if (thread_state_get_tcbQueued(tcb->tcbState)) {
         tcb_queue_t queue;
@@ -18701,13 +21658,14 @@ tcbSchedDequeue(tcb_t *tcb)
 #ifdef CONFIG_DEBUG_BUILD
 void tcbDebugAppend(tcb_t *tcb)
 {
+    debug_tcb_t *debug_tcb = TCB_PTR_DEBUG_PTR(tcb);
     /* prepend to the list */
-    tcb->tcbDebugPrev = NULL;
+    debug_tcb->tcbDebugPrev = NULL;
 
-    tcb->tcbDebugNext = NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity);
+    debug_tcb->tcbDebugNext = NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity);
 
     if (NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity)) {
-        NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity)->tcbDebugPrev = tcb;
+        TCB_PTR_DEBUG_PTR(NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity))->tcbDebugPrev = tcb;
     }
 
     NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity) = tcb;
@@ -18715,26 +21673,29 @@ void tcbDebugAppend(tcb_t *tcb)
 
 void tcbDebugRemove(tcb_t *tcb)
 {
+    debug_tcb_t *debug_tcb = TCB_PTR_DEBUG_PTR(tcb);
+
     assert(NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity) != NULL);
     if (tcb == NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity)) {
-        NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity) = NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity)->tcbDebugNext;
+        NODE_STATE_ON_CORE(ksDebugTCBs, tcb->tcbAffinity) = TCB_PTR_DEBUG_PTR(NODE_STATE_ON_CORE(ksDebugTCBs,
+                                                                                                 tcb->tcbAffinity))->tcbDebugNext;
     } else {
-        assert(tcb->tcbDebugPrev);
-        tcb->tcbDebugPrev->tcbDebugNext = tcb->tcbDebugNext;
+        assert(TCB_PTR_DEBUG_PTR(tcb)->tcbDebugPrev);
+        TCB_PTR_DEBUG_PTR(debug_tcb->tcbDebugPrev)->tcbDebugNext = debug_tcb->tcbDebugNext;
     }
 
-    if (tcb->tcbDebugNext) {
-        tcb->tcbDebugNext->tcbDebugPrev = tcb->tcbDebugPrev;
+    if (debug_tcb->tcbDebugNext) {
+        TCB_PTR_DEBUG_PTR(debug_tcb->tcbDebugNext)->tcbDebugPrev = debug_tcb->tcbDebugPrev;
     }
 
-    tcb->tcbDebugPrev = NULL;
-    tcb->tcbDebugNext = NULL;
+    debug_tcb->tcbDebugPrev = NULL;
+    debug_tcb->tcbDebugNext = NULL;
 }
 #endif /* CONFIG_DEBUG_BUILD */
 
+#ifndef CONFIG_KERNEL_MCS
 /* Add TCB to the end of an endpoint queue */
-tcb_queue_t
-tcbEPAppend(tcb_t *tcb, tcb_queue_t queue)
+tcb_queue_t tcbEPAppend(tcb_t *tcb, tcb_queue_t queue)
 {
     if (!queue.head) { /* Empty list */
         queue.head = tcb;
@@ -18747,10 +21708,10 @@ tcbEPAppend(tcb_t *tcb, tcb_queue_t queue)
 
     return queue;
 }
+#endif
 
 /* Remove TCB from an endpoint queue */
-tcb_queue_t
-tcbEPDequeue(tcb_t *tcb, tcb_queue_t queue)
+tcb_queue_t tcbEPDequeue(tcb_t *tcb, tcb_queue_t queue)
 {
     if (tcb->tcbEPPrev) {
         tcb->tcbEPPrev->tcbEPNext = tcb->tcbEPNext;
@@ -18767,21 +21728,99 @@ tcbEPDequeue(tcb_t *tcb, tcb_queue_t queue)
     return queue;
 }
 
-cptr_t PURE
-getExtraCPtr(word_t *bufferPtr, word_t i)
+#ifdef CONFIG_KERNEL_MCS
+void tcbReleaseRemove(tcb_t *tcb)
+{
+    if (likely(thread_state_get_tcbInReleaseQueue(tcb->tcbState))) {
+        if (tcb->tcbSchedPrev) {
+            tcb->tcbSchedPrev->tcbSchedNext = tcb->tcbSchedNext;
+        } else {
+            NODE_STATE_ON_CORE(ksReleaseHead, tcb->tcbAffinity) = tcb->tcbSchedNext;
+            /* the head has changed, we might need to set a new timeout */
+            NODE_STATE_ON_CORE(ksReprogram, tcb->tcbAffinity) = true;
+        }
+
+        if (tcb->tcbSchedNext) {
+            tcb->tcbSchedNext->tcbSchedPrev = tcb->tcbSchedPrev;
+        }
+
+        tcb->tcbSchedNext = NULL;
+        tcb->tcbSchedPrev = NULL;
+        thread_state_ptr_set_tcbInReleaseQueue(&tcb->tcbState, false);
+    }
+}
+
+void tcbReleaseEnqueue(tcb_t *tcb)
+{
+    assert(thread_state_get_tcbInReleaseQueue(tcb->tcbState) == false);
+    assert(thread_state_get_tcbQueued(tcb->tcbState) == false);
+
+    tcb_t *before = NULL;
+    tcb_t *after = NODE_STATE_ON_CORE(ksReleaseHead, tcb->tcbAffinity);
+
+    /* find our place in the ordered queue */
+    while (after != NULL &&
+           refill_head(tcb->tcbSchedContext)->rTime >= refill_head(after->tcbSchedContext)->rTime) {
+        before = after;
+        after = after->tcbSchedNext;
+    }
+
+    if (before == NULL) {
+        /* insert at head */
+        NODE_STATE_ON_CORE(ksReleaseHead, tcb->tcbAffinity) = tcb;
+        NODE_STATE_ON_CORE(ksReprogram, tcb->tcbAffinity) = true;
+    } else {
+        before->tcbSchedNext = tcb;
+    }
+
+    if (after != NULL) {
+        after->tcbSchedPrev = tcb;
+    }
+
+    tcb->tcbSchedNext = after;
+    tcb->tcbSchedPrev = before;
+
+    thread_state_ptr_set_tcbInReleaseQueue(&tcb->tcbState, true);
+}
+
+tcb_t *tcbReleaseDequeue(void)
+{
+    assert(NODE_STATE(ksReleaseHead) != NULL);
+    assert(NODE_STATE(ksReleaseHead)->tcbSchedPrev == NULL);
+    SMP_COND_STATEMENT(assert(NODE_STATE(ksReleaseHead)->tcbAffinity == getCurrentCPUIndex()));
+
+    tcb_t *detached_head = NODE_STATE(ksReleaseHead);
+    NODE_STATE(ksReleaseHead) = NODE_STATE(ksReleaseHead)->tcbSchedNext;
+
+    if (NODE_STATE(ksReleaseHead)) {
+        NODE_STATE(ksReleaseHead)->tcbSchedPrev = NULL;
+    }
+
+    if (detached_head->tcbSchedNext) {
+        detached_head->tcbSchedNext->tcbSchedPrev = NULL;
+        detached_head->tcbSchedNext = NULL;
+    }
+
+    thread_state_ptr_set_tcbInReleaseQueue(&detached_head->tcbState, false);
+    NODE_STATE(ksReprogram) = true;
+
+    return detached_head;
+}
+#endif
+
+cptr_t PURE getExtraCPtr(word_t *bufferPtr, word_t i)
 {
     return (cptr_t)bufferPtr[seL4_MsgMaxLength + 2 + i];
 }
 
-void
-setExtraBadge(word_t *bufferPtr, word_t badge,
-              word_t i)
+void setExtraBadge(word_t *bufferPtr, word_t badge,
+                   word_t i)
 {
     bufferPtr[seL4_MsgMaxLength + 2 + i] = badge;
 }
 
-void
-setupCallerCap(tcb_t *sender, tcb_t *receiver)
+#ifndef CONFIG_KERNEL_MCS
+void setupCallerCap(tcb_t *sender, tcb_t *receiver, bool_t canGrant)
 {
     cte_t *replySlot, *callerSlot;
     cap_t masterCap UNUSED, callerCap UNUSED;
@@ -18792,17 +21831,17 @@ setupCallerCap(tcb_t *sender, tcb_t *receiver)
     /* Haskell error: "Sender must have a valid master reply cap" */
     assert(cap_get_capType(masterCap) == cap_reply_cap);
     assert(cap_reply_cap_get_capReplyMaster(masterCap));
+    assert(cap_reply_cap_get_capReplyCanGrant(masterCap));
     assert(TCB_PTR(cap_reply_cap_get_capTCBPtr(masterCap)) == sender);
     callerSlot = TCB_PTR_CTE_PTR(receiver, tcbCaller);
     callerCap = callerSlot->cap;
     /* Haskell error: "Caller cap must not already exist" */
     assert(cap_get_capType(callerCap) == cap_null_cap);
-    cteInsert(cap_reply_cap_new(false, TCB_REF(sender)),
+    cteInsert(cap_reply_cap_new(canGrant, false, TCB_REF(sender)),
               replySlot, callerSlot);
 }
 
-void
-deleteCallerCap(tcb_t *receiver)
+void deleteCallerCap(tcb_t *receiver)
 {
     cte_t *callerSlot;
 
@@ -18810,11 +21849,11 @@ deleteCallerCap(tcb_t *receiver)
     /** GHOSTUPD: "(True, gs_set_assn cteDeleteOne_'proc (ucast cap_reply_cap))" */
     cteDeleteOne(callerSlot);
 }
+#endif
 
 extra_caps_t current_extra_caps;
 
-exception_t
-lookupExtraCaps(tcb_t* thread, word_t *bufferPtr, seL4_MessageInfo_t info)
+exception_t lookupExtraCaps(tcb_t *thread, word_t *bufferPtr, seL4_MessageInfo_t info)
 {
     lookupSlot_raw_ret_t lu_ret;
     cptr_t cptr;
@@ -18846,9 +21885,8 @@ lookupExtraCaps(tcb_t* thread, word_t *bufferPtr, seL4_MessageInfo_t info)
 }
 
 /* Copy IPC MRs from one thread to another */
-word_t
-copyMRs(tcb_t *sender, word_t *sendBuf, tcb_t *receiver,
-        word_t *recvBuf, word_t n)
+word_t copyMRs(tcb_t *sender, word_t *sendBuf, tcb_t *receiver,
+               word_t *recvBuf, word_t n)
 {
     word_t i;
 
@@ -18873,16 +21911,20 @@ copyMRs(tcb_t *sender, word_t *sendBuf, tcb_t *receiver,
 #ifdef ENABLE_SMP_SUPPORT
 /* This checks if the current updated to scheduler queue is changing the previous scheduling
  * decision made by the scheduler. If its a case, an `irq_reschedule_ipi` is sent */
-void
-remoteQueueUpdate(tcb_t *tcb)
+void remoteQueueUpdate(tcb_t *tcb)
 {
     /* only ipi if the target is for the current domain */
     if (tcb->tcbAffinity != getCurrentCPUIndex() && tcb->tcbDomain == ksCurDomain) {
         tcb_t *targetCurThread = NODE_STATE_ON_CORE(ksCurThread, tcb->tcbAffinity);
 
-        /* reschedule if the target core is idle or we are waking a higher priority thread */
+        /* reschedule if the target core is idle or we are waking a higher priority thread (or
+         * if a new irq would need to be set on MCS) */
         if (targetCurThread == NODE_STATE_ON_CORE(ksIdleThread, tcb->tcbAffinity)  ||
-                tcb->tcbPriority > targetCurThread->tcbPriority) {
+            tcb->tcbPriority > targetCurThread->tcbPriority
+#ifdef CONFIG_KERNEL_MCS
+            || NODE_STATE_ON_CORE(ksReprogram, tcb->tcbAffinity)
+#endif
+           ) {
             ARCH_NODE_STATE(ipiReschedulePending) |= BIT(tcb->tcbAffinity);
         }
     }
@@ -18891,19 +21933,22 @@ remoteQueueUpdate(tcb_t *tcb)
 /* This makes sure the the TCB is not being run on other core.
  * It would request 'IpiRemoteCall_Stall' to switch the core from this TCB
  * We also request the 'irq_reschedule_ipi' to restore the state of target core */
-void
-remoteTCBStall(tcb_t *tcb)
+void remoteTCBStall(tcb_t *tcb)
 {
 
-    if (tcb->tcbAffinity != getCurrentCPUIndex() &&
-            NODE_STATE_ON_CORE(ksCurThread, tcb->tcbAffinity) == tcb) {
+    if (
+#ifdef CONFIG_KERNEL_MCS
+        tcb->tcbSchedContext &&
+#endif
+        tcb->tcbAffinity != getCurrentCPUIndex() &&
+        NODE_STATE_ON_CORE(ksCurThread, tcb->tcbAffinity) == tcb) {
         doRemoteStall(tcb->tcbAffinity);
         ARCH_NODE_STATE(ipiReschedulePending) |= BIT(tcb->tcbAffinity);
     }
 }
 
-static exception_t
-invokeTCB_SetAffinity(tcb_t *thread, word_t affinity)
+#ifndef CONFIG_KERNEL_MCS
+static exception_t invokeTCB_SetAffinity(tcb_t *thread, word_t affinity)
 {
     /* remove the tcb from scheduler queue in case it is already in one
      * and add it to new queue if required */
@@ -18919,8 +21964,7 @@ invokeTCB_SetAffinity(tcb_t *thread, word_t affinity)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeSetAffinity(cap_t cap, word_t length, word_t *buffer)
+static exception_t decodeSetAffinity(cap_t cap, word_t length, word_t *buffer)
 {
     tcb_t *tcb;
     word_t affinity;
@@ -18943,28 +21987,38 @@ decodeSetAffinity(cap_t cap, word_t length, word_t *buffer)
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
     return invokeTCB_SetAffinity(tcb, affinity);
 }
+#endif
 #endif /* ENABLE_SMP_SUPPORT */
 
 #ifdef CONFIG_HARDWARE_DEBUG_API
-static exception_t
-invokeConfigureSingleStepping(word_t *buffer, tcb_t *t,
-                              uint16_t bp_num, word_t n_instrs)
+static exception_t invokeConfigureSingleStepping(bool_t call, word_t *buffer, tcb_t *t,
+                                                 uint16_t bp_num, word_t n_instrs)
 {
     bool_t bp_was_consumed;
+    tcb_t *thread;
+    thread = NODE_STATE(ksCurThread);
+    word_t value;
 
     bp_was_consumed = configureSingleStepping(t, bp_num, n_instrs, false);
     if (n_instrs == 0) {
         unsetBreakpointUsedFlag(t, bp_num);
-        setMR(NODE_STATE(ksCurThread), buffer, 0, false);
+        value = false;
     } else {
         setBreakpointUsedFlag(t, bp_num);
-        setMR(NODE_STATE(ksCurThread), buffer, 0, bp_was_consumed);
+        value = bp_was_consumed;
     }
+
+    if (call) {
+        setRegister(thread, badgeRegister, 0);
+        unsigned int length = setMR(thread, buffer, 0, value);
+        setRegister(thread, msgInfoRegister, wordFromMessageInfo(
+                        seL4_MessageInfo_new(0, 0, 0, length)));
+    }
+    setThreadState(NODE_STATE(ksCurThread), ThreadState_Running);
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeConfigureSingleStepping(cap_t cap, word_t *buffer)
+static exception_t decodeConfigureSingleStepping(cap_t cap, bool_t call, word_t *buffer)
 {
     uint16_t bp_num;
     word_t n_instrs;
@@ -18983,12 +22037,11 @@ decodeConfigureSingleStepping(cap_t cap, word_t *buffer)
     }
 
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
-    return invokeConfigureSingleStepping(buffer, tcb, bp_num, n_instrs);
+    return invokeConfigureSingleStepping(call, buffer, tcb, bp_num, n_instrs);
 }
 
-static exception_t
-invokeSetBreakpoint(tcb_t *tcb, uint16_t bp_num,
-                    word_t vaddr, word_t type, word_t size, word_t rw)
+static exception_t invokeSetBreakpoint(tcb_t *tcb, uint16_t bp_num,
+                                       word_t vaddr, word_t type, word_t size, word_t rw)
 {
     setBreakpoint(tcb, bp_num, vaddr, type, size, rw);
     /* Signal restore_user_context() to pop the breakpoint context on return. */
@@ -18996,8 +22049,7 @@ invokeSetBreakpoint(tcb_t *tcb, uint16_t bp_num,
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeSetBreakpoint(cap_t cap, word_t *buffer)
+static exception_t decodeSetBreakpoint(cap_t cap, word_t *buffer)
 {
     uint16_t bp_num;
     word_t vaddr, type, size, rw;
@@ -19014,7 +22066,7 @@ decodeSetBreakpoint(cap_t cap, word_t *buffer)
     /* We disallow the user to set breakpoint addresses that are in the kernel
      * vaddr range.
      */
-    if (vaddr >= (word_t)kernelBase) {
+    if (vaddr >= (word_t)USER_TOP) {
         userError("Debug: Invalid address %lx: bp addresses must be userspace "
                   "addresses.",
                   vaddr);
@@ -19041,8 +22093,8 @@ decodeSetBreakpoint(cap_t cap, word_t *buffer)
             current_syscall_error.invalidArgumentNumber = 4;
             return EXCEPTION_SYSCALL_ERROR;
         }
-        if (bp_num >= seL4_FirstWatchpoint
-                && seL4_FirstBreakpoint != seL4_FirstWatchpoint) {
+        if ((seL4_FirstWatchpoint == -1 || bp_num >= seL4_FirstWatchpoint)
+            && seL4_FirstBreakpoint != seL4_FirstWatchpoint) {
             userError("Debug: Can't specify a watchpoint ID with type seL4_InstructionBreakpoint.");
             current_syscall_error.type = seL4_InvalidArgument;
             current_syscall_error.invalidArgumentNumber = 2;
@@ -19055,7 +22107,7 @@ decodeSetBreakpoint(cap_t cap, word_t *buffer)
             current_syscall_error.invalidArgumentNumber = 3;
             return EXCEPTION_SYSCALL_ERROR;
         }
-        if (bp_num < seL4_FirstWatchpoint) {
+        if (seL4_FirstWatchpoint != -1 && bp_num < seL4_FirstWatchpoint) {
             userError("Debug: Data watchpoints cannot specify non-data watchpoint ID.");
             current_syscall_error.type = seL4_InvalidArgument;
             current_syscall_error.invalidArgumentNumber = 2;
@@ -19070,7 +22122,7 @@ decodeSetBreakpoint(cap_t cap, word_t *buffer)
     }
 
     if (rw != seL4_BreakOnRead && rw != seL4_BreakOnWrite
-            && rw != seL4_BreakOnReadWrite) {
+        && rw != seL4_BreakOnReadWrite) {
         userError("Debug: Unknown access-type %lu.", rw);
         current_syscall_error.type = seL4_InvalidArgument;
         current_syscall_error.invalidArgumentNumber = 3;
@@ -19114,22 +22166,27 @@ decodeSetBreakpoint(cap_t cap, word_t *buffer)
                                vaddr, type, size, rw);
 }
 
-static exception_t
-invokeGetBreakpoint(word_t *buffer, tcb_t *tcb, uint16_t bp_num)
+static exception_t invokeGetBreakpoint(bool_t call, word_t *buffer, tcb_t *tcb, uint16_t bp_num)
 {
+    tcb_t *thread;
+    thread = NODE_STATE(ksCurThread);
     getBreakpoint_t res;
-
     res = getBreakpoint(tcb, bp_num);
-    setMR(NODE_STATE(ksCurThread), buffer, 0, res.vaddr);
-    setMR(NODE_STATE(ksCurThread), buffer, 1, res.type);
-    setMR(NODE_STATE(ksCurThread), buffer, 2, res.size);
-    setMR(NODE_STATE(ksCurThread), buffer, 3, res.rw);
-    setMR(NODE_STATE(ksCurThread), buffer, 4, res.is_enabled);
+    if (call) {
+        setRegister(thread, badgeRegister, 0);
+        setMR(NODE_STATE(ksCurThread), buffer, 0, res.vaddr);
+        setMR(NODE_STATE(ksCurThread), buffer, 1, res.type);
+        setMR(NODE_STATE(ksCurThread), buffer, 2, res.size);
+        setMR(NODE_STATE(ksCurThread), buffer, 3, res.rw);
+        setMR(NODE_STATE(ksCurThread), buffer, 4, res.is_enabled);
+        setRegister(thread, msgInfoRegister, wordFromMessageInfo(
+                        seL4_MessageInfo_new(0, 0, 0, 5)));
+    }
+    setThreadState(NODE_STATE(ksCurThread), ThreadState_Running);
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeGetBreakpoint(cap_t cap, word_t *buffer)
+static exception_t decodeGetBreakpoint(cap_t cap, bool_t call, word_t *buffer)
 {
     tcb_t *tcb;
     uint16_t bp_num;
@@ -19145,11 +22202,10 @@ decodeGetBreakpoint(cap_t cap, word_t *buffer)
     }
 
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
-    return invokeGetBreakpoint(buffer, tcb, bp_num);
+    return invokeGetBreakpoint(call, buffer, tcb, bp_num);
 }
 
-static exception_t
-invokeUnsetBreakpoint(tcb_t *tcb, uint16_t bp_num)
+static exception_t invokeUnsetBreakpoint(tcb_t *tcb, uint16_t bp_num)
 {
     /* Maintain the bitfield of in-use breakpoints. */
     unsetBreakpoint(tcb, bp_num);
@@ -19157,8 +22213,7 @@ invokeUnsetBreakpoint(tcb_t *tcb, uint16_t bp_num)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeUnsetBreakpoint(cap_t cap, word_t *buffer)
+static exception_t decodeUnsetBreakpoint(cap_t cap, word_t *buffer)
 {
     tcb_t *tcb;
     uint16_t bp_num;
@@ -19178,8 +22233,7 @@ decodeUnsetBreakpoint(cap_t cap, word_t *buffer)
 }
 #endif /* CONFIG_HARDWARE_DEBUG_API */
 
-static exception_t
-invokeSetTLSBase(tcb_t *thread, word_t tls_base)
+static exception_t invokeSetTLSBase(tcb_t *thread, word_t tls_base)
 {
     setRegister(thread, TLS_BASE, tls_base);
     if (thread == NODE_STATE(ksCurThread)) {
@@ -19191,8 +22245,7 @@ invokeSetTLSBase(tcb_t *thread, word_t tls_base)
     return EXCEPTION_NONE;
 }
 
-static exception_t
-decodeSetTLSBase(cap_t cap, word_t length, word_t *buffer)
+static exception_t decodeSetTLSBase(cap_t cap, word_t length, word_t *buffer)
 {
     word_t tls_base;
 
@@ -19212,10 +22265,8 @@ decodeSetTLSBase(cap_t cap, word_t length, word_t *buffer)
  * exception cases for the preemptible bottom end, as they call the invoke
  * functions directly.  This is a significant deviation from the Haskell
  * spec. */
-exception_t
-decodeTCBInvocation(word_t invLabel, word_t length, cap_t cap,
-                    cte_t* slot, extra_caps_t excaps, bool_t call,
-                    word_t *buffer)
+exception_t decodeTCBInvocation(word_t invLabel, word_t length, cap_t cap,
+                                cte_t *slot, bool_t call, word_t *buffer)
 {
     /* Stall the core if we are operating on a remote TCB that is currently running */
     SMP_COND_STATEMENT(remoteTCBStall(TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)));)
@@ -19229,7 +22280,7 @@ decodeTCBInvocation(word_t invLabel, word_t length, cap_t cap,
         return decodeWriteRegisters(cap, length, buffer);
 
     case TCBCopyRegisters:
-        return decodeCopyRegisters(cap, length, excaps, buffer);
+        return decodeCopyRegisters(cap, length, buffer);
 
     case TCBSuspend:
         /* Jump straight to the invoke */
@@ -19243,49 +22294,58 @@ decodeTCBInvocation(word_t invLabel, word_t length, cap_t cap,
                    TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)));
 
     case TCBConfigure:
-        return decodeTCBConfigure(cap, length, slot, excaps, buffer);
+        return decodeTCBConfigure(cap, length, slot, buffer);
 
     case TCBSetPriority:
-        return decodeSetPriority(cap, length, excaps, buffer);
+        return decodeSetPriority(cap, length, buffer);
 
     case TCBSetMCPriority:
-        return decodeSetMCPriority(cap, length, excaps, buffer);
+        return decodeSetMCPriority(cap, length, buffer);
 
     case TCBSetSchedParams:
-        return decodeSetSchedParams(cap, length, excaps, buffer);
+#ifdef CONFIG_KERNEL_MCS
+        return decodeSetSchedParams(cap, length, slot, buffer);
+#else
+        return decodeSetSchedParams(cap, length, buffer);
+#endif
 
     case TCBSetIPCBuffer:
-        return decodeSetIPCBuffer(cap, length, slot, excaps, buffer);
+        return decodeSetIPCBuffer(cap, length, slot, buffer);
 
     case TCBSetSpace:
-        return decodeSetSpace(cap, length, slot, excaps, buffer);
+        return decodeSetSpace(cap, length, slot, buffer);
 
     case TCBBindNotification:
-        return decodeBindNotification(cap, excaps);
+        return decodeBindNotification(cap);
 
     case TCBUnbindNotification:
         return decodeUnbindNotification(cap);
 
+#ifdef CONFIG_KERNEL_MCS
+    case TCBSetTimeoutEndpoint:
+        return decodeSetTimeoutEndpoint(cap, slot);
+#else
 #ifdef ENABLE_SMP_SUPPORT
     case TCBSetAffinity:
         return decodeSetAffinity(cap, length, buffer);
 #endif /* ENABLE_SMP_SUPPORT */
+#endif
 
         /* There is no notion of arch specific TCB invocations so this needs to go here */
 #ifdef CONFIG_VTX
     case TCBSetEPTRoot:
-        return decodeSetEPTRoot(cap, excaps);
+        return decodeSetEPTRoot(cap);
 #endif
 
 #ifdef CONFIG_HARDWARE_DEBUG_API
     case TCBConfigureSingleStepping:
-        return decodeConfigureSingleStepping(cap, buffer);
+        return decodeConfigureSingleStepping(cap, call, buffer);
 
     case TCBSetBreakpoint:
         return decodeSetBreakpoint(cap, buffer);
 
     case TCBGetBreakpoint:
-        return decodeGetBreakpoint(cap, buffer);
+        return decodeGetBreakpoint(cap, call, buffer);
 
     case TCBUnsetBreakpoint:
         return decodeUnsetBreakpoint(cap, buffer);
@@ -19309,16 +22369,14 @@ enum CopyRegistersFlags {
     CopyRegisters_transferInteger = 3
 };
 
-exception_t
-decodeCopyRegisters(cap_t cap, word_t length,
-                    extra_caps_t excaps, word_t *buffer)
+exception_t decodeCopyRegisters(cap_t cap, word_t length, word_t *buffer)
 {
     word_t transferArch;
     tcb_t *srcTCB;
     cap_t source_cap;
     word_t flags;
 
-    if (length < 1 || excaps.excaprefs[0] == NULL) {
+    if (length < 1 || current_extra_caps.excaprefs[0] == NULL) {
         userError("TCB CopyRegisters: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -19328,7 +22386,7 @@ decodeCopyRegisters(cap_t cap, word_t length,
 
     transferArch = Arch_decodeTransfer(flags >> 8);
 
-    source_cap = excaps.excaprefs[0]->cap;
+    source_cap = current_extra_caps.excaprefs[0]->cap;
 
     if (cap_get_capType(source_cap) == cap_thread_cap) {
         srcTCB = TCB_PTR(cap_thread_cap_get_capTCBPtr(source_cap));
@@ -19354,12 +22412,11 @@ enum ReadRegistersFlags {
     ReadRegisters_suspend = 0
 };
 
-exception_t
-decodeReadRegisters(cap_t cap, word_t length, bool_t call,
-                    word_t *buffer)
+exception_t decodeReadRegisters(cap_t cap, word_t length, bool_t call,
+                                word_t *buffer)
 {
     word_t transferArch, flags, n;
-    tcb_t* thread;
+    tcb_t *thread;
 
     if (length < 2) {
         userError("TCB ReadRegisters: Truncated message.");
@@ -19400,12 +22457,11 @@ enum WriteRegistersFlags {
     WriteRegisters_resume = 0
 };
 
-exception_t
-decodeWriteRegisters(cap_t cap, word_t length, word_t *buffer)
+exception_t decodeWriteRegisters(cap_t cap, word_t length, word_t *buffer)
 {
     word_t flags, w;
     word_t transferArch;
-    tcb_t* thread;
+    tcb_t *thread;
 
     if (length < 2) {
         userError("TCB WriteRegisters: Truncated message.");
@@ -19438,37 +22494,66 @@ decodeWriteRegisters(cap_t cap, word_t length, word_t *buffer)
                                     w, transferArch, buffer);
 }
 
-/* SetPriority, SetMCPriority, SetSchedParams, SetIPCBuffer and SetSpace are all
- * specialisations of TCBConfigure. */
-exception_t
-decodeTCBConfigure(cap_t cap, word_t length, cte_t* slot,
-                   extra_caps_t rootCaps, word_t *buffer)
+#ifdef CONFIG_KERNEL_MCS
+static bool_t validFaultHandler(cap_t cap)
+{
+    switch (cap_get_capType(cap)) {
+    case cap_endpoint_cap:
+        if (!cap_endpoint_cap_get_capCanSend(cap) ||
+            (!cap_endpoint_cap_get_capCanGrant(cap) &&
+             !cap_endpoint_cap_get_capCanGrantReply(cap))) {
+            current_syscall_error.type = seL4_InvalidCapability;
+            return false;
+        }
+        break;
+    case cap_null_cap:
+        /* just has no fault endpoint */
+        break;
+    default:
+        current_syscall_error.type = seL4_InvalidCapability;
+        return false;
+    }
+    return true;
+}
+#endif
+
+/* TCBConfigure batches SetIPCBuffer and parts of SetSpace. */
+exception_t decodeTCBConfigure(cap_t cap, word_t length, cte_t *slot, word_t *buffer)
 {
     cte_t *bufferSlot, *cRootSlot, *vRootSlot;
     cap_t bufferCap, cRootCap, vRootCap;
     deriveCap_ret_t dc_ret;
-    cptr_t faultEP;
     word_t cRootData, vRootData, bufferAddr;
-
-    if (length < 4 || rootCaps.excaprefs[0] == NULL
-            || rootCaps.excaprefs[1] == NULL
-            || rootCaps.excaprefs[2] == NULL) {
+#ifdef CONFIG_KERNEL_MCS
+#define TCBCONFIGURE_ARGS 3
+#else
+#define TCBCONFIGURE_ARGS 4
+#endif
+    if (length < TCBCONFIGURE_ARGS || current_extra_caps.excaprefs[0] == NULL
+        || current_extra_caps.excaprefs[1] == NULL
+        || current_extra_caps.excaprefs[2] == NULL) {
         userError("TCB Configure: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    faultEP       = getSyscallArg(0, buffer);
+#ifdef CONFIG_KERNEL_MCS
+    cRootData     = getSyscallArg(0, buffer);
+    vRootData     = getSyscallArg(1, buffer);
+    bufferAddr    = getSyscallArg(2, buffer);
+#else
+    cptr_t faultEP       = getSyscallArg(0, buffer);
     cRootData     = getSyscallArg(1, buffer);
     vRootData     = getSyscallArg(2, buffer);
     bufferAddr    = getSyscallArg(3, buffer);
+#endif
 
-    cRootSlot  = rootCaps.excaprefs[0];
-    cRootCap   = rootCaps.excaprefs[0]->cap;
-    vRootSlot  = rootCaps.excaprefs[1];
-    vRootCap   = rootCaps.excaprefs[1]->cap;
-    bufferSlot = rootCaps.excaprefs[2];
-    bufferCap  = rootCaps.excaprefs[2]->cap;
+    cRootSlot  = current_extra_caps.excaprefs[0];
+    cRootCap   = current_extra_caps.excaprefs[0]->cap;
+    vRootSlot  = current_extra_caps.excaprefs[1];
+    vRootCap   = current_extra_caps.excaprefs[1]->cap;
+    bufferSlot = current_extra_caps.excaprefs[2];
+    bufferCap  = current_extra_caps.excaprefs[2]->cap;
 
     if (bufferAddr == 0) {
         bufferSlot = NULL;
@@ -19486,9 +22571,9 @@ decodeTCBConfigure(cap_t cap, word_t length, cte_t* slot,
     }
 
     if (slotCapLongRunningDelete(
-                TCB_PTR_CTE_PTR(cap_thread_cap_get_capTCBPtr(cap), tcbCTable)) ||
-            slotCapLongRunningDelete(
-                TCB_PTR_CTE_PTR(cap_thread_cap_get_capTCBPtr(cap), tcbVTable))) {
+            TCB_PTR_CTE_PTR(cap_thread_cap_get_capTCBPtr(cap), tcbCTable)) ||
+        slotCapLongRunningDelete(
+            TCB_PTR_CTE_PTR(cap_thread_cap_get_capTCBPtr(cap), tcbVTable))) {
         userError("TCB Configure: CSpace or VSpace currently being deleted.");
         current_syscall_error.type = seL4_IllegalOperation;
         return EXCEPTION_SYSCALL_ERROR;
@@ -19527,6 +22612,17 @@ decodeTCBConfigure(cap_t cap, word_t length, cte_t* slot,
     }
 
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+#ifdef CONFIG_KERNEL_MCS
+    return invokeTCB_ThreadControlCaps(
+               TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), slot,
+               cap_null_cap_new(), NULL,
+               cap_null_cap_new(), NULL,
+               cRootCap, cRootSlot,
+               vRootCap, vRootSlot,
+               bufferAddr, bufferCap,
+               bufferSlot, thread_control_caps_update_space |
+               thread_control_caps_update_ipc_buffer);
+#else
     return invokeTCB_ThreadControl(
                TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), slot,
                faultEP, NULL_PRIO, NULL_PRIO,
@@ -19535,19 +22631,19 @@ decodeTCBConfigure(cap_t cap, word_t length, cte_t* slot,
                bufferAddr, bufferCap,
                bufferSlot, thread_control_update_space |
                thread_control_update_ipc_buffer);
+#endif
 }
 
-exception_t
-decodeSetPriority(cap_t cap, word_t length, extra_caps_t excaps, word_t *buffer)
+exception_t decodeSetPriority(cap_t cap, word_t length, word_t *buffer)
 {
-    if (length < 1 || excaps.excaprefs[0] == NULL) {
+    if (length < 1 || current_extra_caps.excaprefs[0] == NULL) {
         userError("TCB SetPriority: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
     prio_t newPrio = getSyscallArg(0, buffer);
-    cap_t authCap = excaps.excaprefs[0]->cap;
+    cap_t authCap = current_extra_caps.excaprefs[0]->cap;
 
     if (cap_get_capType(authCap) != cap_thread_cap) {
         userError("Set priority: authority cap not a TCB.");
@@ -19565,6 +22661,13 @@ decodeSetPriority(cap_t cap, word_t length, extra_caps_t excaps, word_t *buffer)
     }
 
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+#ifdef CONFIG_KERNEL_MCS
+    return invokeTCB_ThreadControlSched(
+               TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), NULL,
+               cap_null_cap_new(), NULL,
+               NULL_PRIO, newPrio,
+               NULL, thread_control_sched_update_priority);
+#else
     return invokeTCB_ThreadControl(
                TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), NULL,
                0, NULL_PRIO, newPrio,
@@ -19572,19 +22675,19 @@ decodeSetPriority(cap_t cap, word_t length, extra_caps_t excaps, word_t *buffer)
                cap_null_cap_new(), NULL,
                0, cap_null_cap_new(),
                NULL, thread_control_update_priority);
+#endif
 }
 
-exception_t
-decodeSetMCPriority(cap_t cap, word_t length, extra_caps_t excaps, word_t *buffer)
+exception_t decodeSetMCPriority(cap_t cap, word_t length, word_t *buffer)
 {
-    if (length < 1 || excaps.excaprefs[0] == NULL) {
+    if (length < 1 || current_extra_caps.excaprefs[0] == NULL) {
         userError("TCB SetMCPriority: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
     prio_t newMcp = getSyscallArg(0, buffer);
-    cap_t authCap = excaps.excaprefs[0]->cap;
+    cap_t authCap = current_extra_caps.excaprefs[0]->cap;
 
     if (cap_get_capType(authCap) != cap_thread_cap) {
         userError("TCB SetMCPriority: authority cap not a TCB.");
@@ -19602,6 +22705,13 @@ decodeSetMCPriority(cap_t cap, word_t length, extra_caps_t excaps, word_t *buffe
     }
 
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+#ifdef CONFIG_KERNEL_MCS
+    return invokeTCB_ThreadControlSched(
+               TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), NULL,
+               cap_null_cap_new(), NULL,
+               newMcp, NULL_PRIO,
+               NULL, thread_control_sched_update_mcp);
+#else
     return invokeTCB_ThreadControl(
                TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), NULL,
                0, newMcp, NULL_PRIO,
@@ -19609,12 +22719,50 @@ decodeSetMCPriority(cap_t cap, word_t length, extra_caps_t excaps, word_t *buffe
                cap_null_cap_new(), NULL,
                0, cap_null_cap_new(),
                NULL, thread_control_update_mcp);
+#endif
 }
 
-exception_t
-decodeSetSchedParams(cap_t cap, word_t length, extra_caps_t excaps, word_t *buffer)
+#ifdef CONFIG_KERNEL_MCS
+exception_t decodeSetTimeoutEndpoint(cap_t cap, cte_t *slot)
 {
-    if (length < 2 || excaps.excaprefs[0] == NULL) {
+    if (current_extra_caps.excaprefs[0] == NULL) {
+        userError("TCB SetSchedParams: Truncated message.");
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+
+    cte_t *thSlot = current_extra_caps.excaprefs[0];
+    cap_t thCap   = current_extra_caps.excaprefs[0]->cap;
+
+    /* timeout handler */
+    if (!validFaultHandler(thCap)) {
+        userError("TCB SetTimeoutEndpoint: timeout endpoint cap invalid.");
+        current_syscall_error.invalidCapNumber = 1;
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+
+    setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+    return invokeTCB_ThreadControlCaps(
+               TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), slot,
+               cap_null_cap_new(), NULL,
+               thCap, thSlot,
+               cap_null_cap_new(), NULL,
+               cap_null_cap_new(), NULL,
+               0, cap_null_cap_new(), NULL,
+               thread_control_caps_update_timeout);
+}
+#endif
+
+#ifdef CONFIG_KERNEL_MCS
+exception_t decodeSetSchedParams(cap_t cap, word_t length, cte_t *slot, word_t *buffer)
+#else
+exception_t decodeSetSchedParams(cap_t cap, word_t length, word_t *buffer)
+#endif
+{
+    if (length < 2 || current_extra_caps.excaprefs[0] == NULL
+#ifdef CONFIG_KERNEL_MCS
+        || current_extra_caps.excaprefs[1] == NULL || current_extra_caps.excaprefs[2] == NULL
+#endif
+       ) {
         userError("TCB SetSchedParams: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -19622,7 +22770,12 @@ decodeSetSchedParams(cap_t cap, word_t length, extra_caps_t excaps, word_t *buff
 
     prio_t newMcp = getSyscallArg(0, buffer);
     prio_t newPrio = getSyscallArg(1, buffer);
-    cap_t authCap = excaps.excaprefs[0]->cap;
+    cap_t authCap = current_extra_caps.excaprefs[0]->cap;
+#ifdef CONFIG_KERNEL_MCS
+    cap_t scCap   = current_extra_caps.excaprefs[1]->cap;
+    cte_t *fhSlot = current_extra_caps.excaprefs[2];
+    cap_t fhCap   = current_extra_caps.excaprefs[2]->cap;
+#endif
 
     if (cap_get_capType(authCap) != cap_thread_cap) {
         userError("TCB SetSchedParams: authority cap not a TCB.");
@@ -19642,11 +22795,65 @@ decodeSetSchedParams(cap_t cap, word_t length, extra_caps_t excaps, word_t *buff
     status = checkPrio(newPrio, authTCB);
     if (status != EXCEPTION_NONE) {
         userError("TCB SetSchedParams: Requested priority %lu too high (max %lu).",
-                  (unsigned long) newMcp, (unsigned long) authTCB->tcbMCP);
+                  (unsigned long) newPrio, (unsigned long) authTCB->tcbMCP);
         return status;
     }
 
+#ifdef CONFIG_KERNEL_MCS
+    tcb_t *tcb = TCB_PTR(cap_thread_cap_get_capTCBPtr(cap));
+    sched_context_t *sc = NULL;
+    switch (cap_get_capType(scCap)) {
+    case cap_sched_context_cap:
+        sc = SC_PTR(cap_sched_context_cap_get_capSCPtr(scCap));
+        if (tcb->tcbSchedContext) {
+            userError("TCB Configure: tcb already has a scheduling context.");
+            current_syscall_error.type = seL4_IllegalOperation;
+            return EXCEPTION_SYSCALL_ERROR;
+        }
+        if (sc->scTcb) {
+            userError("TCB Configure: sched contextext already bound.");
+            current_syscall_error.type = seL4_IllegalOperation;
+            return EXCEPTION_SYSCALL_ERROR;
+        }
+        if (isBlocked(tcb) && !sc_released(sc)) {
+            userError("TCB Configure: tcb blocked and scheduling context not schedulable.");
+            current_syscall_error.type = seL4_IllegalOperation;
+            return EXCEPTION_SYSCALL_ERROR;
+        }
+        break;
+    case cap_null_cap:
+        if (tcb == NODE_STATE(ksCurThread)) {
+            userError("TCB SetSchedParams: Cannot change sched_context of current thread");
+            current_syscall_error.type = seL4_IllegalOperation;
+            return EXCEPTION_SYSCALL_ERROR;
+        }
+        break;
+    default:
+        userError("TCB Configure: sched context cap invalid.");
+        current_syscall_error.type = seL4_InvalidCapability;
+        current_syscall_error.invalidCapNumber = 2;
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+
+    if (!validFaultHandler(fhCap)) {
+        userError("TCB Configure: fault endpoint cap invalid.");
+        current_syscall_error.type = seL4_InvalidCapability;
+        current_syscall_error.invalidCapNumber = 3;
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+#endif
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+#ifdef CONFIG_KERNEL_MCS
+    return invokeTCB_ThreadControlSched(
+               TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), slot,
+               fhCap, fhSlot,
+               newMcp, newPrio,
+               sc,
+               thread_control_sched_update_mcp |
+               thread_control_sched_update_priority |
+               thread_control_sched_update_sc |
+               thread_control_sched_update_fault);
+#else
     return invokeTCB_ThreadControl(
                TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), NULL,
                0, newMcp, newPrio,
@@ -19655,26 +22862,25 @@ decodeSetSchedParams(cap_t cap, word_t length, extra_caps_t excaps, word_t *buff
                0, cap_null_cap_new(),
                NULL, thread_control_update_mcp |
                thread_control_update_priority);
+#endif
 }
 
 
-exception_t
-decodeSetIPCBuffer(cap_t cap, word_t length, cte_t* slot,
-                   extra_caps_t excaps, word_t *buffer)
+exception_t decodeSetIPCBuffer(cap_t cap, word_t length, cte_t *slot, word_t *buffer)
 {
     cptr_t cptr_bufferPtr;
     cap_t bufferCap;
     cte_t *bufferSlot;
 
-    if (length < 1 || excaps.excaprefs[0] == NULL) {
+    if (length < 1 || current_extra_caps.excaprefs[0] == NULL) {
         userError("TCB SetIPCBuffer: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
     cptr_bufferPtr  = getSyscallArg(0, buffer);
-    bufferSlot = excaps.excaprefs[0];
-    bufferCap  = excaps.excaprefs[0]->cap;
+    bufferSlot = current_extra_caps.excaprefs[0];
+    bufferCap  = current_extra_caps.excaprefs[0]->cap;
 
     if (cptr_bufferPtr == 0) {
         bufferSlot = NULL;
@@ -19694,6 +22900,16 @@ decodeSetIPCBuffer(cap_t cap, word_t length, cte_t* slot,
     }
 
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+#ifdef CONFIG_KERNEL_MCS
+    return invokeTCB_ThreadControlCaps(
+               TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), slot,
+               cap_null_cap_new(), NULL,
+               cap_null_cap_new(), NULL,
+               cap_null_cap_new(), NULL,
+               cap_null_cap_new(), NULL,
+               cptr_bufferPtr, bufferCap,
+               bufferSlot, thread_control_caps_update_ipc_buffer);
+#else
     return invokeTCB_ThreadControl(
                TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), slot,
                0, NULL_PRIO, NULL_PRIO,
@@ -19701,38 +22917,58 @@ decodeSetIPCBuffer(cap_t cap, word_t length, cte_t* slot,
                cap_null_cap_new(), NULL,
                cptr_bufferPtr, bufferCap,
                bufferSlot, thread_control_update_ipc_buffer);
+
+#endif
 }
 
-exception_t
-decodeSetSpace(cap_t cap, word_t length, cte_t* slot,
-               extra_caps_t excaps, word_t *buffer)
+#ifdef CONFIG_KERNEL_MCS
+#define DECODE_SET_SPACE_PARAMS 2
+#else
+#define DECODE_SET_SPACE_PARAMS 3
+#endif
+exception_t decodeSetSpace(cap_t cap, word_t length, cte_t *slot, word_t *buffer)
 {
-    cptr_t faultEP;
     word_t cRootData, vRootData;
     cte_t *cRootSlot, *vRootSlot;
     cap_t cRootCap, vRootCap;
     deriveCap_ret_t dc_ret;
 
-    if (length < 3 || excaps.excaprefs[0] == NULL
-            || excaps.excaprefs[1] == NULL) {
+    if (length < DECODE_SET_SPACE_PARAMS || current_extra_caps.excaprefs[0] == NULL
+        || current_extra_caps.excaprefs[1] == NULL
+#ifdef CONFIG_KERNEL_MCS
+        || current_extra_caps.excaprefs[2] == NULL
+#endif
+       ) {
         userError("TCB SetSpace: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    faultEP   = getSyscallArg(0, buffer);
+#ifdef CONFIG_KERNEL_MCS
+    cRootData = getSyscallArg(0, buffer);
+    vRootData = getSyscallArg(1, buffer);
+
+    cte_t *fhSlot     = current_extra_caps.excaprefs[0];
+    cap_t fhCap      = current_extra_caps.excaprefs[0]->cap;
+    cRootSlot  = current_extra_caps.excaprefs[1];
+    cRootCap   = current_extra_caps.excaprefs[1]->cap;
+    vRootSlot  = current_extra_caps.excaprefs[2];
+    vRootCap   = current_extra_caps.excaprefs[2]->cap;
+#else
+    cptr_t faultEP   = getSyscallArg(0, buffer);
     cRootData = getSyscallArg(1, buffer);
     vRootData = getSyscallArg(2, buffer);
 
-    cRootSlot  = excaps.excaprefs[0];
-    cRootCap   = excaps.excaprefs[0]->cap;
-    vRootSlot  = excaps.excaprefs[1];
-    vRootCap   = excaps.excaprefs[1]->cap;
+    cRootSlot  = current_extra_caps.excaprefs[0];
+    cRootCap   = current_extra_caps.excaprefs[0]->cap;
+    vRootSlot  = current_extra_caps.excaprefs[1];
+    vRootCap   = current_extra_caps.excaprefs[1]->cap;
+#endif
 
     if (slotCapLongRunningDelete(
-                TCB_PTR_CTE_PTR(cap_thread_cap_get_capTCBPtr(cap), tcbCTable)) ||
-            slotCapLongRunningDelete(
-                TCB_PTR_CTE_PTR(cap_thread_cap_get_capTCBPtr(cap), tcbVTable))) {
+            TCB_PTR_CTE_PTR(cap_thread_cap_get_capTCBPtr(cap), tcbCTable)) ||
+        slotCapLongRunningDelete(
+            TCB_PTR_CTE_PTR(cap_thread_cap_get_capTCBPtr(cap), tcbVTable))) {
         userError("TCB SetSpace: CSpace or VSpace currently being deleted.");
         current_syscall_error.type = seL4_IllegalOperation;
         return EXCEPTION_SYSCALL_ERROR;
@@ -19770,7 +23006,25 @@ decodeSetSpace(cap_t cap, word_t length, cte_t* slot,
         return EXCEPTION_SYSCALL_ERROR;
     }
 
+#ifdef CONFIG_KERNEL_MCS
+    /* fault handler */
+    if (!validFaultHandler(fhCap)) {
+        userError("TCB SetSpace: fault endpoint cap invalid.");
+        current_syscall_error.invalidCapNumber = 1;
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+#endif
+
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
+#ifdef CONFIG_KERNEL_MCS
+    return invokeTCB_ThreadControlCaps(
+               TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), slot,
+               fhCap, fhSlot,
+               cap_null_cap_new(), NULL,
+               cRootCap, cRootSlot,
+               vRootCap, vRootSlot,
+               0, cap_null_cap_new(), NULL, thread_control_caps_update_space | thread_control_caps_update_fault);
+#else
     return invokeTCB_ThreadControl(
                TCB_PTR(cap_thread_cap_get_capTCBPtr(cap)), slot,
                faultEP,
@@ -19778,10 +23032,10 @@ decodeSetSpace(cap_t cap, word_t length, cte_t* slot,
                cRootCap, cRootSlot,
                vRootCap, vRootSlot,
                0, cap_null_cap_new(), NULL, thread_control_update_space);
+#endif
 }
 
-exception_t
-decodeDomainInvocation(word_t invLabel, word_t length, extra_caps_t excaps, word_t *buffer)
+exception_t decodeDomainInvocation(word_t invLabel, word_t length, word_t *buffer)
 {
     word_t domain;
     cap_t tcap;
@@ -19797,22 +23051,22 @@ decodeDomainInvocation(word_t invLabel, word_t length, extra_caps_t excaps, word
         return EXCEPTION_SYSCALL_ERROR;
     } else {
         domain = getSyscallArg(0, buffer);
-        if (domain >= CONFIG_NUM_DOMAINS) {
+        if (domain >= numDomains) {
             userError("Domain Configure: invalid domain (%lu >= %u).",
-                      domain, CONFIG_NUM_DOMAINS);
+                      domain, numDomains);
             current_syscall_error.type = seL4_InvalidArgument;
             current_syscall_error.invalidArgumentNumber = 0;
             return EXCEPTION_SYSCALL_ERROR;
         }
     }
 
-    if (unlikely(excaps.excaprefs[0] == NULL)) {
+    if (unlikely(current_extra_caps.excaprefs[0] == NULL)) {
         userError("Domain Configure: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    tcap = excaps.excaprefs[0]->cap;
+    tcap = current_extra_caps.excaprefs[0]->cap;
     if (unlikely(cap_get_capType(tcap) != cap_thread_cap)) {
         userError("Domain Configure: thread cap required.");
         current_syscall_error.type = seL4_InvalidArgument;
@@ -19825,14 +23079,13 @@ decodeDomainInvocation(word_t invLabel, word_t length, extra_caps_t excaps, word
     return EXCEPTION_NONE;
 }
 
-exception_t
-decodeBindNotification(cap_t cap, extra_caps_t excaps)
+exception_t decodeBindNotification(cap_t cap)
 {
     notification_t *ntfnPtr;
     tcb_t *tcb;
     cap_t ntfn_cap;
 
-    if (excaps.excaprefs[0] == NULL) {
+    if (current_extra_caps.excaprefs[0] == NULL) {
         userError("TCB BindNotification: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -19846,7 +23099,7 @@ decodeBindNotification(cap_t cap, extra_caps_t excaps)
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    ntfn_cap = excaps.excaprefs[0]->cap;
+    ntfn_cap = current_extra_caps.excaprefs[0]->cap;
 
     if (cap_get_capType(ntfn_cap) == cap_notification_cap) {
         ntfnPtr = NTFN_PTR(cap_notification_cap_get_capNtfnPtr(ntfn_cap));
@@ -19862,8 +23115,8 @@ decodeBindNotification(cap_t cap, extra_caps_t excaps)
         return EXCEPTION_SYSCALL_ERROR;
     }
 
-    if ((tcb_t*)notification_ptr_get_ntfnQueue_head(ntfnPtr)
-            || (tcb_t*)notification_ptr_get_ntfnBoundTCB(ntfnPtr)) {
+    if ((tcb_t *)notification_ptr_get_ntfnQueue_head(ntfnPtr)
+        || (tcb_t *)notification_ptr_get_ntfnBoundTCB(ntfnPtr)) {
         userError("TCB BindNotification: Notification cannot be bound.");
         current_syscall_error.type = seL4_IllegalOperation;
         return EXCEPTION_SYSCALL_ERROR;
@@ -19874,8 +23127,7 @@ decodeBindNotification(cap_t cap, extra_caps_t excaps)
     return invokeTCB_NotificationControl(tcb, ntfnPtr);
 }
 
-exception_t
-decodeUnbindNotification(cap_t cap)
+exception_t decodeUnbindNotification(cap_t cap)
 {
     tcb_t *tcb;
 
@@ -19893,28 +23145,107 @@ decodeUnbindNotification(cap_t cap)
 
 /* The following functions sit in the preemption monad and implement the
  * preemptible, non-faulting bottom end of a TCB invocation. */
-exception_t
-invokeTCB_Suspend(tcb_t *thread)
+exception_t invokeTCB_Suspend(tcb_t *thread)
 {
     suspend(thread);
     return EXCEPTION_NONE;
 }
 
-exception_t
-invokeTCB_Resume(tcb_t *thread)
+exception_t invokeTCB_Resume(tcb_t *thread)
 {
     restart(thread);
     return EXCEPTION_NONE;
 }
 
-exception_t
-invokeTCB_ThreadControl(tcb_t *target, cte_t* slot,
-                        cptr_t faultep, prio_t mcp, prio_t priority,
-                        cap_t cRoot_newCap, cte_t *cRoot_srcSlot,
-                        cap_t vRoot_newCap, cte_t *vRoot_srcSlot,
-                        word_t bufferAddr, cap_t bufferCap,
-                        cte_t *bufferSrcSlot,
-                        thread_control_flag_t updateFlags)
+#ifdef CONFIG_KERNEL_MCS
+static inline exception_t installTCBCap(tcb_t *target, cap_t tCap, cte_t *slot,
+                                        tcb_cnode_index_t index, cap_t newCap, cte_t *srcSlot)
+{
+    cte_t *rootSlot = TCB_PTR_CTE_PTR(target, index);
+    UNUSED exception_t e = cteDelete(rootSlot, true);
+    if (e != EXCEPTION_NONE) {
+        return e;
+    }
+
+    /* cteDelete on a cap installed in the tcb cannot fail */
+    if (sameObjectAs(newCap, srcSlot->cap) &&
+        sameObjectAs(tCap, slot->cap)) {
+        cteInsert(newCap, srcSlot, rootSlot);
+    }
+    return e;
+}
+#endif
+
+#ifdef CONFIG_KERNEL_MCS
+exception_t invokeTCB_ThreadControlCaps(tcb_t *target, cte_t *slot,
+                                        cap_t fh_newCap, cte_t *fh_srcSlot,
+                                        cap_t th_newCap, cte_t *th_srcSlot,
+                                        cap_t cRoot_newCap, cte_t *cRoot_srcSlot,
+                                        cap_t vRoot_newCap, cte_t *vRoot_srcSlot,
+                                        word_t bufferAddr, cap_t bufferCap,
+                                        cte_t *bufferSrcSlot,
+                                        thread_control_flag_t updateFlags)
+{
+    exception_t e;
+    cap_t tCap = cap_thread_cap_new((word_t)target);
+
+    if (updateFlags & thread_control_caps_update_fault) {
+        e = installTCBCap(target, tCap, slot, tcbFaultHandler, fh_newCap, fh_srcSlot);
+        if (e != EXCEPTION_NONE) {
+            return e;
+        }
+
+    }
+
+    if (updateFlags & thread_control_caps_update_timeout) {
+        e = installTCBCap(target, tCap, slot, tcbTimeoutHandler, th_newCap, th_srcSlot);
+        if (e != EXCEPTION_NONE) {
+            return e;
+        }
+    }
+
+    if (updateFlags & thread_control_caps_update_space) {
+        e = installTCBCap(target, tCap, slot, tcbCTable, cRoot_newCap, cRoot_srcSlot);
+        if (e != EXCEPTION_NONE) {
+            return e;
+        }
+
+        e = installTCBCap(target, tCap, slot, tcbVTable, vRoot_newCap, vRoot_srcSlot);
+        if (e != EXCEPTION_NONE) {
+            return e;
+        }
+    }
+
+    if (updateFlags & thread_control_caps_update_ipc_buffer) {
+        cte_t *bufferSlot;
+
+        bufferSlot = TCB_PTR_CTE_PTR(target, tcbBuffer);
+        e = cteDelete(bufferSlot, true);
+        if (e != EXCEPTION_NONE) {
+            return e;
+        }
+        target->tcbIPCBuffer = bufferAddr;
+
+        if (bufferSrcSlot && sameObjectAs(bufferCap, bufferSrcSlot->cap) &&
+            sameObjectAs(tCap, slot->cap)) {
+            cteInsert(bufferCap, bufferSrcSlot, bufferSlot);
+        }
+
+        if (target == NODE_STATE(ksCurThread)) {
+            rescheduleRequired();
+        }
+    }
+
+    return EXCEPTION_NONE;
+}
+#else
+exception_t invokeTCB_ThreadControl(tcb_t *target, cte_t *slot,
+                                    cptr_t faultep, prio_t mcp, prio_t priority,
+                                    cap_t cRoot_newCap, cte_t *cRoot_srcSlot,
+                                    cap_t vRoot_newCap, cte_t *vRoot_srcSlot,
+                                    word_t bufferAddr, cap_t bufferCap,
+                                    cte_t *bufferSrcSlot,
+                                    thread_control_flag_t updateFlags)
 {
     exception_t e;
     cap_t tCap = cap_thread_cap_new((word_t)target);
@@ -19927,10 +23258,6 @@ invokeTCB_ThreadControl(tcb_t *target, cte_t* slot,
         setMCPriority(target, mcp);
     }
 
-    if (updateFlags & thread_control_update_priority) {
-        setPriority(target, priority);
-    }
-
     if (updateFlags & thread_control_update_space) {
         cte_t *rootSlot;
 
@@ -19940,7 +23267,7 @@ invokeTCB_ThreadControl(tcb_t *target, cte_t* slot,
             return e;
         }
         if (sameObjectAs(cRoot_newCap, cRoot_srcSlot->cap) &&
-                sameObjectAs(tCap, slot->cap)) {
+            sameObjectAs(tCap, slot->cap)) {
             cteInsert(cRoot_newCap, cRoot_srcSlot, rootSlot);
         }
     }
@@ -19954,7 +23281,7 @@ invokeTCB_ThreadControl(tcb_t *target, cte_t* slot,
             return e;
         }
         if (sameObjectAs(vRoot_newCap, vRoot_srcSlot->cap) &&
-                sameObjectAs(tCap, slot->cap)) {
+            sameObjectAs(tCap, slot->cap)) {
             cteInsert(vRoot_newCap, vRoot_srcSlot, rootSlot);
         }
     }
@@ -19969,10 +23296,8 @@ invokeTCB_ThreadControl(tcb_t *target, cte_t* slot,
         }
         target->tcbIPCBuffer = bufferAddr;
 
-        Arch_setTCBIPCBuffer(target, bufferAddr);
-
         if (bufferSrcSlot && sameObjectAs(bufferCap, bufferSrcSlot->cap) &&
-                sameObjectAs(tCap, slot->cap)) {
+            sameObjectAs(tCap, slot->cap)) {
             cteInsert(bufferCap, bufferSrcSlot, bufferSlot);
         }
 
@@ -19981,14 +23306,53 @@ invokeTCB_ThreadControl(tcb_t *target, cte_t* slot,
         }
     }
 
+    if (updateFlags & thread_control_update_priority) {
+        setPriority(target, priority);
+    }
+
     return EXCEPTION_NONE;
 }
+#endif
 
-exception_t
-invokeTCB_CopyRegisters(tcb_t *dest, tcb_t *tcb_src,
-                        bool_t suspendSource, bool_t resumeTarget,
-                        bool_t transferFrame, bool_t transferInteger,
-                        word_t transferArch)
+#ifdef CONFIG_KERNEL_MCS
+exception_t invokeTCB_ThreadControlSched(tcb_t *target, cte_t *slot,
+                                         cap_t fh_newCap, cte_t *fh_srcSlot,
+                                         prio_t mcp, prio_t priority,
+                                         sched_context_t *sc,
+                                         thread_control_flag_t updateFlags)
+{
+    if (updateFlags & thread_control_sched_update_fault) {
+        cap_t tCap = cap_thread_cap_new((word_t)target);
+        exception_t e = installTCBCap(target, tCap, slot, tcbFaultHandler, fh_newCap, fh_srcSlot);
+        if (e != EXCEPTION_NONE) {
+            return e;
+        }
+    }
+
+    if (updateFlags & thread_control_sched_update_mcp) {
+        setMCPriority(target, mcp);
+    }
+
+    if (updateFlags & thread_control_sched_update_priority) {
+        setPriority(target, priority);
+    }
+
+    if (updateFlags & thread_control_sched_update_sc) {
+        if (sc != NULL && sc != target->tcbSchedContext) {
+            schedContext_bindTCB(sc, target);
+        } else if (sc == NULL && target->tcbSchedContext != NULL) {
+            schedContext_unbindTCB(target->tcbSchedContext, target);
+        }
+    }
+
+    return EXCEPTION_NONE;
+}
+#endif
+
+exception_t invokeTCB_CopyRegisters(tcb_t *dest, tcb_t *tcb_src,
+                                    bool_t suspendSource, bool_t resumeTarget,
+                                    bool_t transferFrame, bool_t transferInteger,
+                                    word_t transferArch)
 {
     if (suspendSource) {
         suspend(tcb_src);
@@ -20039,9 +23403,8 @@ invokeTCB_CopyRegisters(tcb_t *dest, tcb_t *tcb_src,
  * top-level replyFromKernel_success_empty() from running by setting the
  * thread state. Retype does this too.
  */
-exception_t
-invokeTCB_ReadRegisters(tcb_t *tcb_src, bool_t suspendSource,
-                        word_t n, word_t arch, bool_t call)
+exception_t invokeTCB_ReadRegisters(tcb_t *tcb_src, bool_t suspendSource,
+                                    word_t n, word_t arch, bool_t call)
 {
     word_t i, j;
     exception_t e;
@@ -20079,13 +23442,13 @@ invokeTCB_ReadRegisters(tcb_t *tcb_src, bool_t suspendSource,
         j = i;
 
         for (i = 0; i < n_gpRegisters && i + n_frameRegisters < n
-                && i + n_frameRegisters < n_msgRegisters; i++) {
+             && i + n_frameRegisters < n_msgRegisters; i++) {
             setRegister(thread, msgRegisters[i + n_frameRegisters],
                         getRegister(tcb_src, gpRegisters[i]));
         }
 
         if (ipcBuffer != NULL && i < n_gpRegisters
-                && i + n_frameRegisters < n) {
+            && i + n_frameRegisters < n) {
             for (; i < n_gpRegisters && i + n_frameRegisters < n; i++) {
                 ipcBuffer[i + n_frameRegisters + 1] =
                     getRegister(tcb_src, gpRegisters[i]);
@@ -20100,9 +23463,8 @@ invokeTCB_ReadRegisters(tcb_t *tcb_src, bool_t suspendSource,
     return EXCEPTION_NONE;
 }
 
-exception_t
-invokeTCB_WriteRegisters(tcb_t *dest, bool_t resumeTarget,
-                         word_t n, word_t arch, word_t *buffer)
+exception_t invokeTCB_WriteRegisters(tcb_t *dest, bool_t resumeTarget,
+                                     word_t n, word_t arch, word_t *buffer)
 {
     word_t i;
     word_t pc;
@@ -20152,8 +23514,7 @@ invokeTCB_WriteRegisters(tcb_t *dest, bool_t resumeTarget,
     return EXCEPTION_NONE;
 }
 
-exception_t
-invokeTCB_NotificationControl(tcb_t *tcb, notification_t *ntfnPtr)
+exception_t invokeTCB_NotificationControl(tcb_t *tcb, notification_t *ntfnPtr)
 {
     if (ntfnPtr) {
         bindNotification(tcb, ntfnPtr);
@@ -20165,15 +23526,13 @@ invokeTCB_NotificationControl(tcb_t *tcb, notification_t *ntfnPtr)
 }
 
 #ifdef CONFIG_DEBUG_BUILD
-void
-setThreadName(tcb_t *tcb, const char *name)
+void setThreadName(tcb_t *tcb, const char *name)
 {
-    strlcpy(tcb->tcbName, name, TCB_NAME_LENGTH);
+    strlcpy(TCB_PTR_DEBUG_PTR(tcb)->tcbName, name, TCB_NAME_LENGTH);
 }
 #endif
 
-word_t
-setMRs_syscall_error(tcb_t *thread, word_t *receiveIPCBuffer)
+word_t setMRs_syscall_error(tcb_t *thread, word_t *receiveIPCBuffer)
 {
     switch (current_syscall_error.type) {
     case seL4_InvalidArgument:
@@ -20213,15 +23572,11 @@ setMRs_syscall_error(tcb_t *thread, word_t *receiveIPCBuffer)
         fail("Invalid syscall error");
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/object/untyped.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -20238,16 +23593,13 @@ setMRs_syscall_error(tcb_t *thread, word_t *receiveIPCBuffer)
 #include <kernel/thread.h>
 #include <util.h>
 
-static word_t
-alignUp(word_t baseValue, word_t alignment)
+static word_t alignUp(word_t baseValue, word_t alignment)
 {
     return (baseValue + (BIT(alignment) - 1)) & ~MASK(alignment);
 }
 
-exception_t
-decodeUntypedInvocation(word_t invLabel, word_t length, cte_t *slot,
-                        cap_t cap, extra_caps_t excaps,
-                        bool_t call, word_t *buffer)
+exception_t decodeUntypedInvocation(word_t invLabel, word_t length, cte_t *slot,
+                                    cap_t cap, bool_t call, word_t *buffer)
 {
     word_t newType, userObjSize, nodeIndex;
     word_t nodeDepth, nodeOffset, nodeWindow;
@@ -20257,7 +23609,7 @@ decodeUntypedInvocation(word_t invLabel, word_t length, cte_t *slot,
     lookupSlot_ret_t lu_ret;
     word_t nodeSize;
     word_t i;
-    slot_range_t slots;
+    cte_t *destCNode;
     word_t freeRef, alignedFreeRef, objectSize, untypedFreeBytes;
     word_t freeIndex;
     bool_t deviceMemory;
@@ -20271,7 +23623,7 @@ decodeUntypedInvocation(word_t invLabel, word_t length, cte_t *slot,
     }
 
     /* Ensure message length valid. */
-    if (length < 6 || excaps.excaprefs[0] == NULL) {
+    if (length < 6 || current_extra_caps.excaprefs[0] == NULL) {
         userError("Untyped invocation: Truncated message.");
         current_syscall_error.type = seL4_TruncatedMessage;
         return EXCEPTION_SYSCALL_ERROR;
@@ -20285,7 +23637,7 @@ decodeUntypedInvocation(word_t invLabel, word_t length, cte_t *slot,
     nodeOffset  = getSyscallArg(4, buffer);
     nodeWindow  = getSyscallArg(5, buffer);
 
-    rootSlot = excaps.excaprefs[0];
+    rootSlot = current_extra_caps.excaprefs[0];
 
     /* Is the requested object type valid? */
     if (newType >= seL4_ObjectTypeCount) {
@@ -20324,11 +23676,20 @@ decodeUntypedInvocation(word_t invLabel, word_t length, cte_t *slot,
         return EXCEPTION_SYSCALL_ERROR;
     }
 
+#ifdef CONFIG_KERNEL_MCS
+    if (newType == seL4_SchedContextObject && userObjSize < seL4_MinSchedContextBits) {
+        userError("Untyped retype: Requested a scheduling context too small.");
+        current_syscall_error.type = seL4_InvalidArgument;
+        current_syscall_error.invalidArgumentNumber = 1;
+        return EXCEPTION_SYSCALL_ERROR;
+    }
+#endif
+
     /* Lookup the destination CNode (where our caps will be placed in). */
     if (nodeDepth == 0) {
-        nodeCap = excaps.excaprefs[0]->cap;
+        nodeCap = current_extra_caps.excaprefs[0]->cap;
     } else {
-        cap_t rootCap = excaps.excaprefs[0]->cap;
+        cap_t rootCap = current_extra_caps.excaprefs[0]->cap;
         lu_ret = lookupTargetSlot(rootCap, nodeIndex, nodeDepth);
         if (lu_ret.status != EXCEPTION_NONE) {
             userError("Untyped Retype: Invalid destination address.");
@@ -20373,11 +23734,9 @@ decodeUntypedInvocation(word_t invLabel, word_t length, cte_t *slot,
     }
 
     /* Ensure that the destination slots are all empty. */
-    slots.cnode = CTE_PTR(cap_cnode_cap_get_capCNodePtr(nodeCap));
-    slots.offset = nodeOffset;
-    slots.length = nodeWindow;
+    destCNode = CTE_PTR(cap_cnode_cap_get_capCNodePtr(nodeCap));
     for (i = nodeOffset; i < nodeOffset + nodeWindow; i++) {
-        status = ensureEmptySlot(slots.cnode + i);
+        status = ensureEmptySlot(destCNode + i);
         if (status != EXCEPTION_NONE) {
             userError("Untyped Retype: Slot #%d in destination window non-empty.",
                       (int)i);
@@ -20430,7 +23789,7 @@ decodeUntypedInvocation(word_t invLabel, word_t length, cte_t *slot,
 
     deviceMemory = cap_untyped_cap_get_capIsDevice(cap);
     if ((deviceMemory && !Arch_isFrameType(newType))
-            && newType != seL4_UntypedObject) {
+        && newType != seL4_UntypedObject) {
         userError("Untyped Retype: Creating kernel objects with device untyped");
         current_syscall_error.type = seL4_InvalidArgument;
         current_syscall_error.invalidArgumentNumber = 1;
@@ -20444,12 +23803,11 @@ decodeUntypedInvocation(word_t invLabel, word_t length, cte_t *slot,
     /* Perform the retype. */
     setThreadState(NODE_STATE(ksCurThread), ThreadState_Restart);
     return invokeUntyped_Retype(slot, reset,
-                                (void*)alignedFreeRef, newType, userObjSize,
-                                slots, deviceMemory);
+                                (void *)alignedFreeRef, newType, userObjSize,
+                                destCNode, nodeOffset, nodeWindow, deviceMemory);
 }
 
-static exception_t
-resetUntypedCap(cte_t *srcSlot)
+static exception_t resetUntypedCap(cte_t *srcSlot)
 {
     cap_t prev_cap = srcSlot->cap;
     word_t block_size = cap_untyped_cap_get_capBlockSize(prev_cap);
@@ -20475,7 +23833,7 @@ resetUntypedCap(cte_t *srcSlot)
         srcSlot->cap = cap_untyped_cap_set_capFreeIndex(prev_cap, 0);
     } else {
         for (offset = ROUND_DOWN(offset - 1, chunk);
-                offset != - BIT (chunk); offset -= BIT (chunk)) {
+             offset != - BIT(chunk); offset -= BIT(chunk)) {
             clearMemory(GET_OFFSET_FREE_PTR(regionBase, offset), chunk);
             srcSlot->cap = cap_untyped_cap_set_capFreeIndex(prev_cap, OFFSET_TO_FREE_INDEX(offset));
             status = preemptionPoint();
@@ -20487,18 +23845,16 @@ resetUntypedCap(cte_t *srcSlot)
     return EXCEPTION_NONE;
 }
 
-exception_t
-invokeUntyped_Retype(cte_t *srcSlot,
-                     bool_t reset, void* retypeBase,
-                     object_t newType, word_t userSize,
-                     slot_range_t destSlots, bool_t deviceMemory)
+exception_t invokeUntyped_Retype(cte_t *srcSlot,
+                                 bool_t reset, void *retypeBase,
+                                 object_t newType, word_t userSize,
+                                 cte_t *destCNode, word_t destOffset, word_t destLength,
+                                 bool_t deviceMemory)
 {
     word_t freeRef;
     word_t totalObjectSize;
     void *regionBase = WORD_PTR(cap_untyped_cap_get_capPtr(srcSlot->cap));
     exception_t status;
-
-    freeRef = GET_FREE_REF(regionBase, cap_untyped_cap_get_capFreeIndex(srcSlot->cap));
 
     if (reset) {
         status = resetUntypedCap(srcSlot);
@@ -20507,27 +23863,27 @@ invokeUntyped_Retype(cte_t *srcSlot,
         }
     }
 
-    /* Update the amount of free space left in this untyped cap. */
-    totalObjectSize = destSlots.length << getObjectSize(newType, userSize);
+    /* Update the amount of free space left in this untyped cap.
+     *
+     * Note that userSize is not necessarily the true size of the object in
+     * memory. In the case where newType is seL4_CapTableObject, the size is
+     * transformed by getObjectSize. */
+    totalObjectSize = destLength << getObjectSize(newType, userSize);
     freeRef = (word_t)retypeBase + totalObjectSize;
     srcSlot->cap = cap_untyped_cap_set_capFreeIndex(srcSlot->cap,
                                                     GET_FREE_INDEX(regionBase, freeRef));
 
     /* Create new objects and caps. */
-    createNewObjects(newType, srcSlot, destSlots, retypeBase, userSize,
-                     deviceMemory);
+    createNewObjects(newType, srcSlot, destCNode, destOffset, destLength,
+                     retypeBase, userSize, deviceMemory);
 
     return EXCEPTION_NONE;
 }
-
+#line 1 "/Users/payas/git/seL4/src/plat/pc99/machine/acpi.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -20684,8 +24040,7 @@ const char acpi_str_fadt[] = {'F', 'A', 'C', 'P', 0};
 const char acpi_str_apic[] = {'A', 'P', 'I', 'C', 0};
 const char acpi_str_dmar[] = {'D', 'M', 'A', 'R', 0};
 
-BOOT_CODE static uint8_t
-acpi_calc_checksum(char* start, uint32_t length)
+BOOT_CODE static uint8_t acpi_calc_checksum(char *start, uint32_t length)
 {
     uint8_t checksum = 0;
 
@@ -20697,25 +24052,23 @@ acpi_calc_checksum(char* start, uint32_t length)
     return checksum;
 }
 
-BOOT_CODE static acpi_rsdp_t*
-acpi_get_rsdp(void)
+BOOT_CODE static acpi_rsdp_t *acpi_get_rsdp(void)
 {
-    char* addr;
+    char *addr;
 
-    for (addr = (char*)BIOS_PADDR_START; addr < (char*)BIOS_PADDR_END; addr += 16) {
+    for (addr = (char *)BIOS_PADDR_START; addr < (char *)BIOS_PADDR_END; addr += 16) {
         if (strncmp(addr, acpi_str_rsd, 8) == 0) {
             if (acpi_calc_checksum(addr, ACPI_V1_SIZE) == 0) {
-                return (acpi_rsdp_t*)addr;
+                return (acpi_rsdp_t *)addr;
             }
         }
     }
     return NULL;
 }
 
-BOOT_CODE static void*
-acpi_table_init(void* entry, enum acpi_type table_type)
+BOOT_CODE static void *acpi_table_init(void *entry, enum acpi_type table_type)
 {
-    void* acpi_table;
+    void *acpi_table;
     unsigned int pages_for_table;
     unsigned int pages_for_header = 1;
 
@@ -20730,12 +24083,12 @@ acpi_table_init(void* entry, enum acpi_type table_type)
 
     switch (table_type) {
     case ACPI_RSDP: {
-        acpi_rsdp_t *rsdp_entry = (acpi_rsdp_t*)entry;
+        acpi_rsdp_t *rsdp_entry = (acpi_rsdp_t *)entry;
         pages_for_table = (rsdp_entry->length + offset_in_page) / MASK(LARGE_PAGE_BITS) + 1;
         break;
     }
     case ACPI_RSDT: { // RSDT, MADT, DMAR etc.
-        acpi_rsdt_t *rsdt_entry = (acpi_rsdt_t*)entry;
+        acpi_rsdt_t *rsdt_entry = (acpi_rsdt_t *)entry;
         pages_for_table = (rsdt_entry->header.length + offset_in_page) / MASK(LARGE_PAGE_BITS) + 1;
         break;
     }
@@ -20751,10 +24104,9 @@ acpi_table_init(void* entry, enum acpi_type table_type)
     return acpi_table;
 }
 
-BOOT_CODE bool_t
-acpi_init(acpi_rsdp_t *rsdp_data)
+BOOT_CODE bool_t acpi_init(acpi_rsdp_t *rsdp_data)
 {
-    acpi_rsdp_t* acpi_rsdp = acpi_get_rsdp();
+    acpi_rsdp_t *acpi_rsdp = acpi_get_rsdp();
 
     if (acpi_rsdp == NULL) {
         printf("BIOS: No ACPI support detected\n");
@@ -20771,30 +24123,29 @@ acpi_init(acpi_rsdp_t *rsdp_data)
     return acpi_validate_rsdp(rsdp_data);
 }
 
-BOOT_CODE bool_t
-acpi_validate_rsdp(acpi_rsdp_t *acpi_rsdp)
+BOOT_CODE bool_t acpi_validate_rsdp(acpi_rsdp_t *acpi_rsdp)
 {
-    acpi_rsdt_t* acpi_rsdt;
-    acpi_rsdt_t* acpi_rsdt_mapped;
+    acpi_rsdt_t *acpi_rsdt;
+    acpi_rsdt_t *acpi_rsdt_mapped;
 
-    if (acpi_calc_checksum((char*)acpi_rsdp, ACPI_V1_SIZE) != 0) {
+    if (acpi_calc_checksum((char *)acpi_rsdp, ACPI_V1_SIZE) != 0) {
         printf("BIOS: ACPIv1 information corrupt\n");
         return false;
     }
 
-    if (acpi_rsdp->revision > 0 && acpi_calc_checksum((char*)acpi_rsdp, sizeof(*acpi_rsdp)) != 0) {
+    if (acpi_rsdp->revision > 0 && acpi_calc_checksum((char *)acpi_rsdp, sizeof(*acpi_rsdp)) != 0) {
         printf("BIOS: ACPIv2 information corrupt\n");
         return false;
     }
 
     /* verify the rsdt, even though we do not actually make use of the mapping right now */
-    acpi_rsdt = (acpi_rsdt_t*)(word_t)acpi_rsdp->rsdt_address;
+    acpi_rsdt = (acpi_rsdt_t *)(word_t)acpi_rsdp->rsdt_address;
     printf("ACPI: RSDT paddr=%p\n", acpi_rsdt);
-    acpi_rsdt_mapped = (acpi_rsdt_t*)acpi_table_init(acpi_rsdt, ACPI_RSDT);
+    acpi_rsdt_mapped = (acpi_rsdt_t *)acpi_table_init(acpi_rsdt, ACPI_RSDT);
     printf("ACPI: RSDT vaddr=%p\n", acpi_rsdt_mapped);
 
     assert(acpi_rsdt_mapped->header.length > 0);
-    if (acpi_calc_checksum((char*)acpi_rsdt_mapped, acpi_rsdt_mapped->header.length) != 0) {
+    if (acpi_calc_checksum((char *)acpi_rsdt_mapped, acpi_rsdt_mapped->header.length) != 0) {
         printf("ACPI: RSDT checksum failure\n");
         return false;
     }
@@ -20802,23 +24153,22 @@ acpi_validate_rsdp(acpi_rsdp_t *acpi_rsdp)
     return true;
 }
 
-BOOT_CODE uint32_t
-acpi_madt_scan(
-    acpi_rsdp_t* acpi_rsdp,
-    cpu_id_t*    cpu_list,
-    uint32_t*    num_ioapic,
-    paddr_t*     ioapic_paddrs
+BOOT_CODE uint32_t acpi_madt_scan(
+    acpi_rsdp_t *acpi_rsdp,
+    cpu_id_t    *cpu_list,
+    uint32_t    *num_ioapic,
+    paddr_t     *ioapic_paddrs
 )
 {
     unsigned int entries;
     uint32_t            num_cpu;
     uint32_t            count;
-    acpi_madt_t*        acpi_madt;
-    acpi_madt_header_t* acpi_madt_header;
+    acpi_madt_t        *acpi_madt;
+    acpi_madt_header_t *acpi_madt_header;
 
-    acpi_rsdt_t* acpi_rsdt_mapped;
-    acpi_madt_t* acpi_madt_mapped;
-    acpi_rsdt_mapped = (acpi_rsdt_t*)acpi_table_init((acpi_rsdt_t*)(word_t)acpi_rsdp->rsdt_address, ACPI_RSDT);
+    acpi_rsdt_t *acpi_rsdt_mapped;
+    acpi_madt_t *acpi_madt_mapped;
+    acpi_rsdt_mapped = (acpi_rsdt_t *)acpi_table_init((acpi_rsdt_t *)(word_t)acpi_rsdp->rsdt_address, ACPI_RSDT);
 
     num_cpu = 0;
     *num_ioapic = 0;
@@ -20827,8 +24177,8 @@ acpi_madt_scan(
     /* Divide by uint32_t explicitly as this is the size as mandated by the ACPI standard */
     entries = (acpi_rsdt_mapped->header.length - sizeof(acpi_header_t)) / sizeof(uint32_t);
     for (count = 0; count < entries; count++) {
-        acpi_madt = (acpi_madt_t*)(word_t)acpi_rsdt_mapped->entry[count];
-        acpi_madt_mapped = (acpi_madt_t*)acpi_table_init(acpi_madt, ACPI_RSDT);
+        acpi_madt = (acpi_madt_t *)(word_t)acpi_rsdt_mapped->entry[count];
+        acpi_madt_mapped = (acpi_madt_t *)acpi_table_init(acpi_madt, ACPI_RSDT);
 
         if (strncmp(acpi_str_apic, acpi_madt_mapped->header.signature, 4) == 0) {
             printf("ACPI: MADT paddr=%p\n", acpi_madt);
@@ -20836,9 +24186,9 @@ acpi_madt_scan(
             printf("ACPI: MADT apic_addr=0x%x\n", acpi_madt_mapped->apic_addr);
             printf("ACPI: MADT flags=0x%x\n", acpi_madt_mapped->flags);
 
-            acpi_madt_header = (acpi_madt_header_t*)(acpi_madt_mapped + 1);
+            acpi_madt_header = (acpi_madt_header_t *)(acpi_madt_mapped + 1);
 
-            while ((char*)acpi_madt_header < (char*)acpi_madt_mapped + acpi_madt_mapped->header.length) {
+            while ((char *)acpi_madt_header < (char *)acpi_madt_mapped + acpi_madt_mapped->header.length) {
                 switch (acpi_madt_header->type) {
                 /* ACPI specifies the following rules when listing APIC IDs:
                  *  - Boot processor is listed first
@@ -20849,8 +24199,8 @@ acpi_madt_scan(
                  *    should be listed in X2APIC subtable */
                 case MADT_APIC: {
                     /* what Intel calls apic_id is what is called cpu_id in seL4! */
-                    uint8_t  cpu_id = ((acpi_madt_apic_t*)acpi_madt_header)->apic_id;
-                    uint32_t flags  = ((acpi_madt_apic_t*)acpi_madt_header)->flags;
+                    uint8_t  cpu_id = ((acpi_madt_apic_t *)acpi_madt_header)->apic_id;
+                    uint32_t flags  = ((acpi_madt_apic_t *)acpi_madt_header)->flags;
                     if (flags == 1) {
                         printf("ACPI: MADT_APIC apic_id=0x%x\n", cpu_id);
                         if (num_cpu == CONFIG_MAX_NUM_NODES) {
@@ -20863,8 +24213,8 @@ acpi_madt_scan(
                     break;
                 }
                 case MADT_x2APIC: {
-                    uint32_t cpu_id = ((acpi_madt_x2apic_t*)acpi_madt_header)->x2apic_id;
-                    uint32_t flags  = ((acpi_madt_x2apic_t*)acpi_madt_header)->flags;
+                    uint32_t cpu_id = ((acpi_madt_x2apic_t *)acpi_madt_header)->x2apic_id;
+                    uint32_t flags  = ((acpi_madt_x2apic_t *)acpi_madt_header)->flags;
                     if (flags == 1) {
                         printf("ACPI: MADT_x2APIC apic_id=0x%x\n", cpu_id);
                         if (num_cpu == CONFIG_MAX_NUM_NODES) {
@@ -20879,28 +24229,28 @@ acpi_madt_scan(
                 case MADT_IOAPIC:
                     printf(
                         "ACPI: MADT_IOAPIC ioapic_id=%d ioapic_addr=0x%x gsib=%d\n",
-                        ((acpi_madt_ioapic_t*)acpi_madt_header)->ioapic_id,
-                        ((acpi_madt_ioapic_t*)acpi_madt_header)->ioapic_addr,
-                        ((acpi_madt_ioapic_t*)acpi_madt_header)->gsib
+                        ((acpi_madt_ioapic_t *)acpi_madt_header)->ioapic_id,
+                        ((acpi_madt_ioapic_t *)acpi_madt_header)->ioapic_addr,
+                        ((acpi_madt_ioapic_t *)acpi_madt_header)->gsib
                     );
                     if (*num_ioapic == CONFIG_MAX_NUM_IOAPIC) {
                         printf("ACPI: Not recording this IOAPIC, only support %d\n", CONFIG_MAX_NUM_IOAPIC);
                     } else {
-                        ioapic_paddrs[*num_ioapic] = ((acpi_madt_ioapic_t*)acpi_madt_header)->ioapic_addr;
+                        ioapic_paddrs[*num_ioapic] = ((acpi_madt_ioapic_t *)acpi_madt_header)->ioapic_addr;
                         (*num_ioapic)++;
                     }
                     break;
                 case MADT_ISO:
                     printf("ACPI: MADT_ISO bus=%d source=%d gsi=%d flags=0x%x\n",
-                           ((acpi_madt_iso_t*)acpi_madt_header)->bus,
-                           ((acpi_madt_iso_t*)acpi_madt_header)->source,
-                           ((acpi_madt_iso_t*)acpi_madt_header)->gsi,
-                           ((acpi_madt_iso_t*)acpi_madt_header)->flags);
+                           ((acpi_madt_iso_t *)acpi_madt_header)->bus,
+                           ((acpi_madt_iso_t *)acpi_madt_header)->source,
+                           ((acpi_madt_iso_t *)acpi_madt_header)->gsi,
+                           ((acpi_madt_iso_t *)acpi_madt_header)->flags);
                     break;
                 default:
                     break;
                 }
-                acpi_madt_header = (acpi_madt_header_t*)((char*)acpi_madt_header + acpi_madt_header->length);
+                acpi_madt_header = (acpi_madt_header_t *)((char *)acpi_madt_header + acpi_madt_header->length);
             }
         }
     }
@@ -20910,25 +24260,24 @@ acpi_madt_scan(
     return num_cpu;
 }
 
-BOOT_CODE bool_t
-acpi_fadt_scan(
-    acpi_rsdp_t* acpi_rsdp
+BOOT_CODE bool_t acpi_fadt_scan(
+    acpi_rsdp_t *acpi_rsdp
 )
 {
     unsigned int entries;
     uint32_t            count;
-    acpi_fadt_t*        acpi_fadt;
+    acpi_fadt_t        *acpi_fadt;
 
-    acpi_rsdt_t* acpi_rsdt_mapped;
-    acpi_fadt_t* acpi_fadt_mapped;
-    acpi_rsdt_mapped = (acpi_rsdt_t*)acpi_table_init((acpi_rsdt_t*)(word_t)acpi_rsdp->rsdt_address, ACPI_RSDT);
+    acpi_rsdt_t *acpi_rsdt_mapped;
+    acpi_fadt_t *acpi_fadt_mapped;
+    acpi_rsdt_mapped = (acpi_rsdt_t *)acpi_table_init((acpi_rsdt_t *)(word_t)acpi_rsdp->rsdt_address, ACPI_RSDT);
 
     assert(acpi_rsdt_mapped->header.length >= sizeof(acpi_header_t));
     /* Divide by uint32_t explicitly as this is the size as mandated by the ACPI standard */
     entries = (acpi_rsdt_mapped->header.length - sizeof(acpi_header_t)) / sizeof(uint32_t);
     for (count = 0; count < entries; count++) {
-        acpi_fadt = (acpi_fadt_t*)(word_t)acpi_rsdt_mapped->entry[count];
-        acpi_fadt_mapped = (acpi_fadt_t*)acpi_table_init(acpi_fadt, ACPI_RSDT);
+        acpi_fadt = (acpi_fadt_t *)(word_t)acpi_rsdt_mapped->entry[count];
+        acpi_fadt_mapped = (acpi_fadt_t *)acpi_table_init(acpi_fadt, ACPI_RSDT);
 
         if (strncmp(acpi_str_fadt, acpi_fadt_mapped->header.signature, 4) == 0) {
             printf("ACPI: FADT paddr=%p\n", acpi_fadt);
@@ -20936,7 +24285,7 @@ acpi_fadt_scan(
             printf("ACPI: FADT flags=0x%x\n", acpi_fadt_mapped->flags);
 
             if (config_set(CONFIG_USE_LOGICAL_IDS) &&
-                    acpi_fadt_mapped->flags & BIT(19)) {
+                acpi_fadt_mapped->flags & BIT(19)) {
                 printf("system requires apic physical mode\n");
                 return false;
             }
@@ -20946,11 +24295,10 @@ acpi_fadt_scan(
     return true;
 }
 
-BOOT_CODE void
-acpi_dmar_scan(
-    acpi_rsdp_t* acpi_rsdp,
-    paddr_t*     drhu_list,
-    uint32_t*    num_drhu,
+BOOT_CODE void acpi_dmar_scan(
+    acpi_rsdp_t *acpi_rsdp,
+    paddr_t     *drhu_list,
+    uint32_t    *num_drhu,
     uint32_t     max_drhu_list_len,
     acpi_rmrr_list_t *rmrr_list
 )
@@ -20962,15 +24310,15 @@ acpi_dmar_scan(
     int rmrr_count;
     dev_id_t dev_id;
 
-    acpi_dmar_t*          acpi_dmar;
-    acpi_dmar_header_t*   acpi_dmar_header;
-    acpi_dmar_rmrr_t*     acpi_dmar_rmrr;
-    acpi_dmar_devscope_t* acpi_dmar_devscope;
+    acpi_dmar_t          *acpi_dmar;
+    acpi_dmar_header_t   *acpi_dmar_header;
+    acpi_dmar_rmrr_t     *acpi_dmar_rmrr;
+    acpi_dmar_devscope_t *acpi_dmar_devscope;
 
-    acpi_rsdt_t* acpi_rsdt_mapped;
-    acpi_dmar_t* acpi_dmar_mapped;
+    acpi_rsdt_t *acpi_rsdt_mapped;
+    acpi_dmar_t *acpi_dmar_mapped;
 
-    acpi_rsdt_mapped = (acpi_rsdt_t*)acpi_table_init((acpi_rsdt_t*)(word_t)acpi_rsdp->rsdt_address, ACPI_RSDT);
+    acpi_rsdt_mapped = (acpi_rsdt_t *)acpi_table_init((acpi_rsdt_t *)(word_t)acpi_rsdp->rsdt_address, ACPI_RSDT);
 
     *num_drhu = 0;
     rmrr_count = 0;
@@ -20978,16 +24326,16 @@ acpi_dmar_scan(
     assert(acpi_rsdt_mapped->header.length >= sizeof(acpi_header_t));
     entries = (acpi_rsdt_mapped->header.length - sizeof(acpi_header_t)) / sizeof(uint32_t);
     for (count = 0; count < entries; count++) {
-        acpi_dmar = (acpi_dmar_t*)(word_t)acpi_rsdt_mapped->entry[count];
-        acpi_dmar_mapped = (acpi_dmar_t*)acpi_table_init(acpi_dmar, ACPI_RSDT);
+        acpi_dmar = (acpi_dmar_t *)(word_t)acpi_rsdt_mapped->entry[count];
+        acpi_dmar_mapped = (acpi_dmar_t *)acpi_table_init(acpi_dmar, ACPI_RSDT);
 
         if (strncmp(acpi_str_dmar, acpi_dmar_mapped->header.signature, 4) == 0) {
             printf("ACPI: DMAR paddr=%p\n", acpi_dmar);
             printf("ACPI: DMAR vaddr=%p\n", acpi_dmar_mapped);
             printf("ACPI: IOMMU host address width: %d\n", acpi_dmar_mapped->host_addr_width + 1);
-            acpi_dmar_header = (acpi_dmar_header_t*)(acpi_dmar_mapped + 1);
+            acpi_dmar_header = (acpi_dmar_header_t *)(acpi_dmar_mapped + 1);
 
-            while ((char*)acpi_dmar_header < (char*)acpi_dmar_mapped + acpi_dmar_mapped->header.length) {
+            while ((char *)acpi_dmar_header < (char *)acpi_dmar_mapped + acpi_dmar_mapped->header.length) {
                 switch (acpi_dmar_header->type) {
 
                 case DMAR_DRHD:
@@ -20997,8 +24345,8 @@ acpi_dmar_scan(
                         *num_drhu = 0; /* report zero IOMMUs */
                         return;
                     }
-                    reg_basel = ((acpi_dmar_drhd_t*)acpi_dmar_header)->reg_base[0];
-                    reg_baseh = ((acpi_dmar_drhd_t*)acpi_dmar_header)->reg_base[1];
+                    reg_basel = ((acpi_dmar_drhd_t *)acpi_dmar_header)->reg_base[0];
+                    reg_baseh = ((acpi_dmar_drhd_t *)acpi_dmar_header)->reg_base[1];
                     /* check if value fits into uint32_t */
                     if (reg_baseh != 0) {
                         printf("ACPI: DMAR_DRHD reg_base exceeds 32 bit, disabling IOMMU support\n");
@@ -21012,9 +24360,9 @@ acpi_dmar_scan(
 
                 case DMAR_RMRR:
                     /* loop through all device scopes of this RMRR */
-                    acpi_dmar_rmrr = (acpi_dmar_rmrr_t*)acpi_dmar_header;
+                    acpi_dmar_rmrr = (acpi_dmar_rmrr_t *)acpi_dmar_header;
                     if (acpi_dmar_rmrr->reg_base[1] != 0 ||
-                            acpi_dmar_rmrr->reg_limit[1] != 0) {
+                        acpi_dmar_rmrr->reg_limit[1] != 0) {
                         printf("ACPI: RMRR device above 4GiB, disabling IOMMU support\n");
                         *num_drhu = 0;
                         return ;
@@ -21069,28 +24417,24 @@ acpi_dmar_scan(
                 default:
                     printf("ACPI: Unknown DMA remapping structure type: %x\n", acpi_dmar_header->type);
                 }
-                acpi_dmar_header = (acpi_dmar_header_t*)((char*)acpi_dmar_header + acpi_dmar_header->length);
+                acpi_dmar_header = (acpi_dmar_header_t *)((char *)acpi_dmar_header + acpi_dmar_header->length);
             }
         }
     }
     rmrr_list->num = rmrr_count;
     printf("ACPI: %d IOMMUs detected\n", *num_drhu);
 }
-
+#line 1 "/Users/payas/git/seL4/src/plat/pc99/machine/hardware.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 #include <machine/io.h>
 #include <arch/kernel/apic.h>
-#include <arch/x86/arch/model/statedata.h>
+#include <arch/model/statedata.h>
 #include <linker.h>
 #include <plat/machine/pic.h>
 #include <plat/machine/ioapic.h>
@@ -21103,8 +24447,8 @@ BOOT_CODE bool_t platAddDevices(void)
     /* remove the MSI region as poking at this is undefined and may allow for
      * the user to generate arbitrary MSI interrupts. Only need to consider
      * this if it would actually be in the user device region */
-    if (PADDR_USER_DEVICE_TOP > 0xFFFFFFF8) {
-        if (!add_allocated_p_region( (p_region_t) {
+    if (CONFIG_PADDR_USER_DEVICE_TOP > 0xFFFFFFF8) {
+        if (!reserve_region((p_region_t) {
         (word_t)0xFFFFFFF8, (word_t)0xFFFFFFF8 + 8
         })) {
             return false;
@@ -21117,8 +24461,7 @@ BOOT_CODE bool_t platAddDevices(void)
 
 #define TSC_FREQ_RETRIES 10
 
-BOOT_CODE static inline uint32_t
-measure_tsc_khz(void)
+BOOT_CODE static inline uint32_t measure_tsc_khz(void)
 {
     /* The frequency is repeatedly measured until the number of TSC
      * ticks in the pit wraparound interval (~50ms) fits in 32 bits.
@@ -21157,9 +24500,12 @@ measure_tsc_khz(void)
     return 0;
 }
 
-BOOT_CODE uint32_t
-tsc_init(void)
+BOOT_CODE uint32_t tsc_init(void)
 {
+
+#if CONFIG_PC99_TSC_FREQUENCY > 0
+    return CONFIG_PC99_TSC_FREQUENCY / 1000000;
+#endif
 
     x86_cpu_identity_t *model_info = x86_cpuid_get_model_info();
     uint32_t valid_models[] = {
@@ -21188,8 +24534,8 @@ tsc_init(void)
                     if (ratio != 0) {
                         /* Convert to MHz */
                         if (model_info->model == NEHALEM_1_MODEL_ID ||
-                                model_info->model == NEHALEM_2_MODEL_ID ||
-                                model_info->model == NEHALEM_3_MODEL_ID) {
+                            model_info->model == NEHALEM_2_MODEL_ID ||
+                            model_info->model == NEHALEM_3_MODEL_ID) {
                             return ratio * 13333u / 100u;
                         } else {
                             return ratio * 100u;
@@ -21214,15 +24560,11 @@ tsc_init(void)
     /* finally, return mhz */
     return tsc_khz / 1000u;
 }
-
+#line 1 "/Users/payas/git/seL4/src/plat/pc99/machine/intel-vtd.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -21233,7 +24575,7 @@ tsc_init(void)
 #include <machine.h>
 #include <machine/io.h>
 #include <arch/kernel/apic.h>
-#include <arch/x86/arch/model/statedata.h>
+#include <arch/model/statedata.h>
 #include <linker.h>
 #include <plat/machine/acpi.h>
 #include <plat/machine/intel-vtd.h>
@@ -21307,16 +24649,18 @@ tsc_init(void)
 #define DMA_TLB_READ_DRAIN  BIT(17)
 #define DMA_TLB_WRITE_DRAIN BIT(16)
 
+#define N_VTD_CONTEXTS 256
+
 typedef uint32_t drhu_id_t;
 
 static inline uint32_t vtd_read32(drhu_id_t drhu_id, uint32_t offset)
 {
-    return *(volatile uint32_t*)(PPTR_DRHU_START + (drhu_id << PAGE_BITS) + offset);
+    return *(volatile uint32_t *)(PPTR_DRHU_START + (drhu_id << PAGE_BITS) + offset);
 }
 
 static inline void vtd_write32(drhu_id_t drhu_id, uint32_t offset, uint32_t value)
 {
-    *(volatile uint32_t*)(PPTR_DRHU_START + (drhu_id << PAGE_BITS) + offset) = value;
+    *(volatile uint32_t *)(PPTR_DRHU_START + (drhu_id << PAGE_BITS) + offset) = value;
 }
 
 
@@ -21484,18 +24828,58 @@ void vtd_handle_fault(void)
     }
 }
 
-BOOT_CODE static void
-vtd_create_root_table(void)
+BOOT_CODE word_t vtd_get_n_paging(acpi_rmrr_list_t *rmrr_list)
 {
-    x86KSvtdRootTable = (void*)alloc_region(VTD_RT_SIZE_BITS);
-    memzero((void*)x86KSvtdRootTable, BIT(VTD_RT_SIZE_BITS));
+    if (x86KSnumDrhu == 0) {
+        return 0;
+    }
+    assert(x86KSnumIOPTLevels > 0);
+
+    word_t size = 1; /* one for the root table */
+    size += N_VTD_CONTEXTS; /* one for each context */
+    size += rmrr_list->num; /* one for each device */
+
+    if (rmrr_list->num == 0) {
+        return size;
+    }
+
+    /* filter the identical regions by pci bus id */
+    acpi_rmrr_list_t filtered;
+    filtered.entries[0] = rmrr_list->entries[0];
+    filtered.num = 1;
+
+    for (word_t i = 1; i < rmrr_list->num; i++) {
+        if (vtd_get_root_index(rmrr_list->entries[i].device) !=
+            vtd_get_root_index(filtered.entries[filtered.num - 1].device) &&
+            rmrr_list->entries[i].base != filtered.entries[filtered.num - 1].base &&
+            rmrr_list->entries[i].limit != filtered.entries[filtered.num - 1].limit) {
+            filtered.entries[filtered.num] = rmrr_list->entries[i];
+            filtered.num++;
+        }
+    }
+
+    for (word_t i = x86KSnumIOPTLevels - 1; i > 0; i--) {
+        /* If we are still looking up bits beyond the 32bit of physical
+         * that we support then we select entry 0 in the current PT */
+        if ((VTD_PT_INDEX_BITS * i + seL4_PageBits) >= 32) {
+            size++;
+        } else {
+            for (word_t j = 0; j < filtered.num; j++) {
+                v_region_t region = (v_region_t) {
+                    .start = filtered.entries[j].base,
+                    .end = filtered.entries[j].limit
+                };
+                size += get_n_paging(region, 32 - (VTD_PT_INDEX_BITS * i + seL4_PageBits));
+            }
+        }
+    }
+    return size;
 }
 
 /* This function is a simplistic duplication of some of the logic
  * in iospace.c
  */
-BOOT_CODE static void
-vtd_map_reserved_page(vtd_cte_t *vtd_context_table, int context_index, paddr_t addr)
+BOOT_CODE static void vtd_map_reserved_page(vtd_cte_t *vtd_context_table, int context_index, paddr_t addr)
 {
     int i;
     vtd_pte_t *iopt;
@@ -21503,11 +24887,7 @@ vtd_map_reserved_page(vtd_cte_t *vtd_context_table, int context_index, paddr_t a
     /* first check for the first page table */
     vtd_cte_t *vtd_context_slot = vtd_context_table + context_index;
     if (!vtd_cte_ptr_get_present(vtd_context_slot)) {
-        iopt = (vtd_pte_t*)alloc_region(seL4_IOPageTableBits);
-        if (!iopt) {
-            fail("Failed to allocate IO page table");
-        }
-        memzero(iopt, BIT(seL4_IOPageTableBits));
+        iopt = (vtd_pte_t *) it_alloc_paging();
         flushCacheRange(iopt, seL4_IOPageTableBits);
 
         *vtd_context_slot = vtd_cte_new(
@@ -21520,17 +24900,17 @@ vtd_map_reserved_page(vtd_cte_t *vtd_context_table, int context_index, paddr_t a
         x86KSFirstValidIODomain++;
         flushCacheRange(vtd_context_slot, VTD_CTE_SIZE_BITS);
     } else {
-        iopt = (vtd_pte_t*)paddr_to_pptr(vtd_cte_ptr_get_asr(vtd_context_slot));
+        iopt = (vtd_pte_t *)paddr_to_pptr(vtd_cte_ptr_get_asr(vtd_context_slot));
     }
     /* now recursively find and map page tables */
     for (i = x86KSnumIOPTLevels - 1; i >= 0; i--) {
         uint32_t iopt_index;
         /* If we are still looking up bits beyond the 32bit of physical
          * that we support then we select entry 0 in the current PT */
-        if (VTD_PT_INDEX_BITS * i >= 32) {
+        if (VTD_PT_INDEX_BITS * i + seL4_PageBits >= 32) {
             iopt_index = 0;
         } else {
-            iopt_index = ( (addr >> seL4_PageBits) >> (VTD_PT_INDEX_BITS * i)) & MASK(VTD_PT_INDEX_BITS);
+            iopt_index = ((addr >> seL4_PageBits) >> (VTD_PT_INDEX_BITS * i)) & MASK(VTD_PT_INDEX_BITS);
         }
         vtd_pte_slot = iopt + iopt_index;
         if (i == 0) {
@@ -21539,37 +24919,24 @@ vtd_map_reserved_page(vtd_cte_t *vtd_context_table, int context_index, paddr_t a
             flushCacheRange(vtd_pte_slot, VTD_PTE_SIZE_BITS);
         } else {
             if (!vtd_pte_ptr_get_write(vtd_pte_slot)) {
-                iopt = (vtd_pte_t*)alloc_region(seL4_IOPageTableBits);
-                if (!iopt) {
-                    fail("Failed to allocate IO page table");
-                }
-                memzero(iopt, BIT(seL4_IOPageTableBits));
+                iopt = (vtd_pte_t *) it_alloc_paging();
                 flushCacheRange(iopt, seL4_IOPageTableBits);
 
                 *vtd_pte_slot = vtd_pte_new(pptr_to_paddr(iopt), 1, 1);
                 flushCacheRange(vtd_pte_slot, VTD_PTE_SIZE_BITS);
             } else {
-                iopt = (vtd_pte_t*)paddr_to_pptr(vtd_pte_ptr_get_addr(vtd_pte_slot));
+                iopt = (vtd_pte_t *)paddr_to_pptr(vtd_pte_ptr_get_addr(vtd_pte_slot));
             }
         }
     }
 }
 
-BOOT_CODE static void
-vtd_create_context_table(
-    uint8_t   bus,
-    uint32_t  max_num_iopt_levels,
-    acpi_rmrr_list_t *rmrr_list
-)
+BOOT_CODE static void vtd_create_context_table(uint8_t bus, acpi_rmrr_list_t *rmrr_list)
 {
     word_t i;
-    vtd_cte_t* vtd_context_table = (vtd_cte_t*)alloc_region(VTD_CT_SIZE_BITS);
-    if (!vtd_context_table) {
-        fail("Failed to allocate context table");
-    }
+    vtd_cte_t *vtd_context_table = (vtd_cte_t *) it_alloc_paging();
 
     printf("IOMMU: Create VTD context table for PCI bus 0x%x (pptr=%p)\n", bus, vtd_context_table);
-    memzero(vtd_context_table, BIT(VTD_CT_SIZE_BITS));
     flushCacheRange(vtd_context_table, VTD_CT_SIZE_BITS);
 
     x86KSvtdRootTable[bus] =
@@ -21582,15 +24949,13 @@ vtd_create_context_table(
         if (vtd_get_root_index(rmrr_list->entries[i].device) == bus) {
             uint32_t addr;
             for (addr = rmrr_list->entries[i].base; addr < rmrr_list->entries[i].limit; addr += BIT(seL4_PageBits)) {
-                (void)vtd_map_reserved_page;
                 vtd_map_reserved_page(vtd_context_table, vtd_get_context_index(rmrr_list->entries[i].device), addr);
             }
         }
     }
 }
 
-BOOT_CODE static bool_t
-vtd_enable(cpu_id_t cpu_id)
+BOOT_CODE static bool_t vtd_enable(cpu_id_t cpu_id)
 {
     drhu_id_t i;
     uint32_t status = 0;
@@ -21655,20 +25020,8 @@ vtd_enable(cpu_id_t cpu_id)
     return true;
 }
 
-BOOT_CODE bool_t
-vtd_init(
-    cpu_id_t  cpu_id,
-    uint32_t  num_drhu,
-    acpi_rmrr_list_t *rmrr_list
-)
+BOOT_CODE bool_t vtd_init_num_iopts(uint32_t num_drhu)
 {
-    drhu_id_t i;
-    uint32_t  bus;
-    uint32_t  aw_bitmask = 0xffffffff;
-    uint32_t  max_num_iopt_levels;
-    /* Start the number of domains at 16 bits */
-    uint32_t  num_domain_id_bits = 16;
-
     x86KSnumDrhu = num_drhu;
     x86KSFirstValidIODomain = 0;
 
@@ -21676,7 +25029,10 @@ vtd_init(
         return true;
     }
 
-    for (i = 0; i < x86KSnumDrhu; i++) {
+    uint32_t aw_bitmask = 0xffffffff;
+    /* Start the number of domains at 16 bits */
+    uint32_t  num_domain_id_bits = 16;
+    for (drhu_id_t i = 0; i < x86KSnumDrhu; i++) {
         uint32_t bits_supported = 4 + 2 * (vtd_read32(i, CAP_REG) & 7);
         aw_bitmask &= vtd_read32(i, CAP_REG) >> SAGAW;
         printf("IOMMU 0x%x: %d-bit domain IDs supported\n", i, bits_supported);
@@ -21686,7 +25042,7 @@ vtd_init(
     }
 
     x86KSnumIODomainIDBits = num_domain_id_bits;
-
+    UNUSED uint32_t  max_num_iopt_levels;
     if (aw_bitmask & SAGAW_6_LEVEL) {
         max_num_iopt_levels = 6;
     } else if (aw_bitmask & SAGAW_5_LEVEL) {
@@ -21718,15 +25074,19 @@ vtd_init(
     }
 
     printf("IOMMU: Using %d page-table levels (max. supported: %d)\n", x86KSnumIOPTLevels, max_num_iopt_levels);
+    return true;
+}
 
-    vtd_create_root_table();
 
-    for (bus = 0; bus < 256; bus++) {
-        vtd_create_context_table(
-            bus,
-            max_num_iopt_levels,
-            rmrr_list
-        );
+BOOT_CODE bool_t vtd_init(cpu_id_t  cpu_id, acpi_rmrr_list_t *rmrr_list)
+{
+    if (x86KSnumDrhu == 0) {
+        return true;
+    }
+
+    x86KSvtdRootTable = (vtd_rte_t *) it_alloc_paging();
+    for (uint32_t bus = 0; bus < N_VTD_CONTEXTS; bus++) {
+        vtd_create_context_table(bus, rmrr_list);
     }
 
     flushCacheRange(x86KSvtdRootTable, VTD_RT_SIZE_BITS);
@@ -21738,26 +25098,22 @@ vtd_init(
 }
 
 #endif /* CONFIG_IOMMU */
-
+#line 1 "/Users/payas/git/seL4/src/plat/pc99/machine/io.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
 #include <arch/kernel/boot_sys.h>
-#include <arch/x86/arch/model/statedata.h>
+#include <arch/model/statedata.h>
 #include <machine/io.h>
 #include <plat/machine/io.h>
+#include <drivers/uart.h>
 
 #if defined(CONFIG_DEBUG_BUILD) || defined(CONFIG_PRINTING)
-void
-serial_init(uint16_t port)
+void serial_init(uint16_t port)
 {
     while (!(in8(port + 5) & 0x60)); /* wait until not busy */
 
@@ -21772,41 +25128,40 @@ serial_init(uint16_t port)
     in8(port + 5); /* clear line status port */
     in8(port + 6); /* clear modem status port */
 }
-#endif /* CONFIG_PRINTING || CONFIG_DEBUG_BUILD */
+#endif /* defined(CONFIG_DEBUG_BUILD) || defined(CONFIG_PRINTING) */
 
 #ifdef CONFIG_PRINTING
-void
-putConsoleChar(unsigned char a)
+
+/* there is no UART driver at drivers/serial/... for the pc99 platform, but we
+ * implement parts of the API here, so we can reuse the generic code.
+ */
+void uart_drv_putchar(
+    unsigned char c)
 {
-    while (x86KSconsolePort && !(in8(x86KSconsolePort + 5) & 0x20));
-    out8(x86KSconsolePort, a);
+    while (x86KSdebugPort && (in8(x86KSdebugPort + 5) & 0x20) == 0);
+    out8(x86KSdebugPort, c);
 }
+
+void kernel_putDebugChar(unsigned char c)
+{
+    /* this will take care of CR/LF handling and call uart_drv_putchar() */
+    uart_console_putchar(c);
+}
+
 #endif /* CONFIG_PRINTING */
 
 #ifdef CONFIG_DEBUG_BUILD
-void
-putDebugChar(unsigned char a)
-{
-    while (x86KSdebugPort && (in8(x86KSdebugPort + 5) & 0x20) == 0);
-    out8(x86KSdebugPort, a);
-}
-
-unsigned char
-getDebugChar(void)
+unsigned char kernel_getDebugChar(void)
 {
     while ((in8(x86KSdebugPort + 5) & 1) == 0);
     return in8(x86KSdebugPort);
 }
 #endif /* CONFIG_DEBUG_BUILD */
-
+#line 1 "/Users/payas/git/seL4/src/plat/pc99/machine/ioapic.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -21839,19 +25194,19 @@ getDebugChar(void)
 
 /* Cache what we believe is in the low word of the IOREDTBL. This
  * has all the state of trigger modes etc etc */
-static uint32_t ioredtbl_state[IOAPIC_IRQ_LINES * CONFIG_MAX_NUM_IOAPIC];
+static uint32_t ioredtbl_state[IOAPIC_IRQ_LINES * MAX(1, CONFIG_MAX_NUM_IOAPIC)];
 
 /* Number of IOAPICs in the system */
 static uint32_t num_ioapics = 0;
 
 static void ioapic_write(uint32_t ioapic, word_t reg, uint32_t value)
 {
-    *(volatile uint32_t*)((word_t)(PPTR_IOAPIC_START + ioapic * BIT(PAGE_BITS)) + reg) = value;
+    *(volatile uint32_t *)((word_t)(PPTR_IOAPIC_START + ioapic * BIT(PAGE_BITS)) + reg) = value;
 }
 
 static uint32_t ioapic_read(uint32_t ioapic, word_t reg)
 {
-    return *(volatile uint32_t*)((word_t)(PPTR_IOAPIC_START + ioapic * BIT(PAGE_BITS)) + reg);
+    return *(volatile uint32_t *)((word_t)(PPTR_IOAPIC_START + ioapic * BIT(PAGE_BITS)) + reg);
 }
 
 static void single_ioapic_init(word_t ioapic, cpu_id_t delivery_cpu)
@@ -21865,7 +25220,8 @@ static void single_ioapic_init(word_t ioapic, cpu_id_t delivery_cpu)
     for (i = 0; i < IOAPIC_IRQ_LINES; i++) {
         /* Send to desired cpu */
         ioapic_write(ioapic, IOAPIC_REGSEL, IOREDTBL_HIGH(i));
-        ioapic_write(ioapic, IOAPIC_WINDOW, (ioapic_read(ioapic, IOAPIC_WINDOW) & MASK(IOREDTBL_HIGH_RESERVED_BITS)) | (delivery_cpu << IOREDTBL_HIGH_RESERVED_BITS));
+        ioapic_write(ioapic, IOAPIC_WINDOW, (ioapic_read(ioapic,
+                                                         IOAPIC_WINDOW) & MASK(IOREDTBL_HIGH_RESERVED_BITS)) | (delivery_cpu << IOREDTBL_HIGH_RESERVED_BITS));
         /* mask and set 0 vector */
         ioredtbl_state[i] = IOREDTBL_LOW_INTERRUPT_MASK;
         ioapic_write(ioapic, IOAPIC_REGSEL, IOREDTBL_LOW(i));
@@ -21970,15 +25326,11 @@ void ioapic_map_pin_to_vector(word_t ioapic, word_t pin, word_t level,
     ioredtbl_state[index] |= ioapic_read(ioapic, IOAPIC_WINDOW) & ~MASK(16);
     ioapic_write(ioapic, IOAPIC_WINDOW, ioredtbl_state[index]);
 }
-
+#line 1 "/Users/payas/git/seL4/src/plat/pc99/machine/pic.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <linker.h>
@@ -21991,8 +25343,7 @@ void ioapic_map_pin_to_vector(word_t ioapic, word_t pin, word_t level,
 #define PIC2_BASE 0xa0
 
 /* Program PIC (i8259) to remap IRQs 0-15 to interrupt vectors starting at 'interrupt' */
-BOOT_CODE void
-pic_remap_irqs(interrupt_t interrupt)
+BOOT_CODE void pic_remap_irqs(interrupt_t interrupt)
 {
     out8(PIC1_BASE, 0x11);
     out8(PIC2_BASE, 0x11);
@@ -22081,15 +25432,11 @@ void pic_ack_active_irq(void)
         out8(PIC1_BASE, 0x20);
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/plat/pc99/machine/pit.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <linker.h>
@@ -22103,8 +25450,7 @@ void pic_ack_active_irq(void)
 /* Count frequency in Hz */
 #define PIT_HZ 1193182
 
-BOOT_CODE void
-pit_init(void)
+BOOT_CODE void pit_init(void)
 {
     uint16_t divisor = (PIT_HZ * PIT_WRAPAROUND_MS) / 1000;
 
@@ -22113,8 +25459,7 @@ pit_init(void)
     out8(PIT_CH0, divisor >> 8);   /* Set high byte of divisor */
 }
 
-BOOT_CODE void
-pit_wait_wraparound(void)
+BOOT_CODE void pit_wait_wraparound(void)
 {
     uint16_t count;
     uint16_t count_old;
@@ -22131,25 +25476,21 @@ pit_wait_wraparound(void)
         count |= (in8(PIT_CH0) << 8);
     }
 }
-
+#line 1 "/Users/payas/git/seL4/src/smp/ipi.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
+
+#ifdef ENABLE_SMP_SUPPORT
+
 #include <mode/smp/ipi.h>
 #include <smp/ipi.h>
 #include <smp/lock.h>
 
-#ifdef ENABLE_SMP_SUPPORT
 /* This function switches the core it is called on to the idle thread,
  * in order to avoid IPI storms. If the core is waiting on the lock, the actual
  * switch will not occur until the core attempts to obtain the lock, at which
@@ -22172,10 +25513,17 @@ void ipiStallCoreCallback(bool_t irqPath)
 
         SCHED_ENQUEUE_CURRENT_TCB;
         switchToIdleThread();
+#ifdef CONFIG_KERNEL_MCS
+        commitTime();
+        NODE_STATE(ksCurSC) = NODE_STATE(ksIdleThread)->tcbSchedContext;
+#endif
         NODE_STATE(ksSchedulerAction) = SchedulerAction_ResumeCurrentThread;
 
         /* Let the cpu requesting this IPI to continue while we waiting on lock */
         big_kernel_lock.node_owners[getCurrentCPUIndex()].ipi = 0;
+#ifdef CONFIG_ARCH_RISCV
+        ipi_clear_irq(irq_remote_call_ipi);
+#endif
         ipi_wait(totalCoreBarrier);
 
         /* Continue waiting on lock */
@@ -22184,7 +25532,7 @@ void ipiStallCoreCallback(bool_t irqPath)
 
                 /* Multiple calls for similar reason could result in stack overflow */
                 assert((IpiRemoteCall_t)remoteCall != IpiRemoteCall_Stall);
-                handleIPI(irq_remote_call_ipi, irqPath);
+                handleIPI(CORE_IRQ_TO_IRQT(getCurrentCPUIndex(), irq_remote_call_ipi), irqPath);
             }
             arch_pause();
         }
@@ -22202,17 +25550,23 @@ void ipiStallCoreCallback(bool_t irqPath)
          * handle the pending interrupt. Its valid as interrups are async events! */
         SCHED_ENQUEUE_CURRENT_TCB;
         switchToIdleThread();
-
+#ifdef CONFIG_KERNEL_MCS
+        commitTime();
+        NODE_STATE(ksCurSC) = NODE_STATE(ksIdleThread)->tcbSchedContext;
+#endif
         NODE_STATE(ksSchedulerAction) = SchedulerAction_ResumeCurrentThread;
     }
 }
 
 void handleIPI(irq_t irq, bool_t irqPath)
 {
-    if (irq == irq_remote_call_ipi) {
+    if (IRQT_TO_IRQ(irq) == irq_remote_call_ipi) {
         handleRemoteCall(remoteCall, get_ipi_arg(0), get_ipi_arg(1), get_ipi_arg(2), irqPath);
-    } else if (irq == irq_reschedule_ipi) {
+    } else if (IRQT_TO_IRQ(irq) == irq_reschedule_ipi) {
         rescheduleRequired();
+#ifdef CONFIG_ARCH_RISCV
+        ifence_local();
+#endif
     } else {
         fail("Invalid IPI");
     }
@@ -22230,7 +25584,7 @@ void doRemoteMaskOp(IpiRemoteCall_t func, word_t data1, word_t data2, word_t dat
 
         /* make sure no resource access passes from this point */
         asm volatile("" ::: "memory");
-        ipi_send_mask(irq_remote_call_ipi, mask, true);
+        ipi_send_mask(CORE_IRQ_TO_IRQT(0, irq_remote_call_ipi), mask, true);
         ipi_wait(totalCoreBarrier);
     }
 }
@@ -22240,7 +25594,7 @@ void doMaskReschedule(word_t mask)
     /* make sure the current core is not set in the mask */
     mask &= ~BIT(getCurrentCPUIndex());
     if (mask != 0) {
-        ipi_send_mask(irq_reschedule_ipi, mask, false);
+        ipi_send_mask(CORE_IRQ_TO_IRQT(0, irq_reschedule_ipi), mask, false);
     }
 }
 
@@ -22256,6 +25610,7 @@ void generic_ipi_send_mask(irq_t ipi, word_t mask, bool_t isBlocking)
             target_cores[nr_target_cores] = index;
             nr_target_cores++;
         } else {
+            IPI_MEM_BARRIER;
             ipi_send_target(ipi, cpuIndexToID(index));
         }
         mask &= ~BIT(index);
@@ -22269,18 +25624,36 @@ void generic_ipi_send_mask(irq_t ipi, word_t mask, bool_t isBlocking)
         }
     }
 }
-#endif /* ENABLE_SMP_SUPPORT */
 
+#ifdef CONFIG_DEBUG_BUILD
+exception_t handle_SysDebugSendIPI(void)
+{
+#ifdef CONFIG_ARCH_ARM
+    word_t target = getRegister(NODE_STATE(ksCurThread), capRegister);
+    word_t irq = getRegister(NODE_STATE(ksCurThread), msgInfoRegister);
+    if (target > CONFIG_MAX_NUM_NODES) {
+        userError("SysDebugSendIPI: Invalid target, halting");
+        halt();
+    }
+    if (irq > 15) {
+        userError("SysDebugSendIPI: Invalid IRQ, not a SGI, halting");
+        halt();
+    }
+    ipi_send_target(CORE_IRQ_TO_IRQT(0, irq), BIT(target));
+    return EXCEPTION_NONE;
+#else /* not CONFIG_ARCH_ARM */
+    userError("SysDebugSendIPI: not supported on this architecture");
+    halt();
+#endif  /* [not] CONFIG_ARCH_ARM */
+}
+#endif /* CONFIG_DEBUG_BUILD */
+
+#endif /* ENABLE_SMP_SUPPORT */
+#line 1 "/Users/payas/git/seL4/src/smp/lock.c"
 /*
- * Copyright 2017, Data61
- * Commonwealth Scientific and Industrial Research Organisation (CSIRO)
- * ABN 41 687 119 230.
+ * Copyright 2020, Data61, CSIRO (ABN 41 687 119 230)
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(DATA61_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -22290,8 +25663,7 @@ void generic_ipi_send_mask(irq_t ipi, word_t mask, bool_t isBlocking)
 
 clh_lock_t big_kernel_lock ALIGN(L1_CACHE_LINE_SIZE);
 
-BOOT_CODE void
-clh_lock_init(void)
+BOOT_CODE void clh_lock_init(void)
 {
     for (int i = 0; i < CONFIG_MAX_NUM_NODES; i++) {
         big_kernel_lock.node_owners[i].node = &big_kernel_lock.nodes[i];
@@ -22303,15 +25675,11 @@ clh_lock_init(void)
 }
 
 #endif /* ENABLE_SMP_SUPPORT */
-
+#line 1 "/Users/payas/git/seL4/src/string.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <config.h>
@@ -22350,15 +25718,11 @@ word_t strlcat(char *dest, const char *src, word_t size)
     }
     return len;
 }
-
+#line 1 "/Users/payas/git/seL4/src/util.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #include <assert.h>
@@ -22376,8 +25740,7 @@ typedef unsigned long __attribute__((__may_alias__)) ulong_alias;
  *
  * 'n' and 's' must be word aligned.
  */
-void
-memzero(void *s, unsigned long n)
+void memzero(void *s, unsigned long n)
 {
     uint8_t *p = s;
 
@@ -22398,8 +25761,7 @@ memzero(void *s, unsigned long n)
     }
 }
 
-void* VISIBLE
-memset(void *s, unsigned long c, unsigned long n)
+void *VISIBLE memset(void *s, unsigned long c, unsigned long n)
 {
     uint8_t *p;
 
@@ -22419,8 +25781,7 @@ memset(void *s, unsigned long c, unsigned long n)
     return s;
 }
 
-void* VISIBLE
-memcpy(void* ptr_dst, const void* ptr_src, unsigned long n)
+void *VISIBLE memcpy(void *ptr_dst, const void *ptr_src, unsigned long n)
 {
     uint8_t *p;
     const uint8_t *q;
@@ -22432,14 +25793,13 @@ memcpy(void* ptr_dst, const void* ptr_src, unsigned long n)
     return ptr_dst;
 }
 
-int PURE
-strncmp(const char* s1, const char* s2, int n)
+int PURE strncmp(const char *s1, const char *s2, int n)
 {
     word_t i;
     int diff;
 
     for (i = 0; i < n; i++) {
-        diff = ((unsigned char*)s1)[i] - ((unsigned char*)s2)[i];
+        diff = ((unsigned char *)s1)[i] - ((unsigned char *)s2)[i];
         if (diff != 0 || s1[i] == '\0') {
             return diff;
         }
@@ -22448,8 +25808,7 @@ strncmp(const char* s1, const char* s2, int n)
     return 0;
 }
 
-long CONST
-char_to_long(char c)
+long CONST char_to_long(char c)
 {
     if (c >= '0' && c <= '9') {
         return c - '0';
@@ -22461,8 +25820,7 @@ char_to_long(char c)
     return -1;
 }
 
-long PURE
-str_to_long(const char* str)
+long PURE str_to_long(const char *str)
 {
     unsigned int base;
     long res;
@@ -22495,58 +25853,327 @@ str_to_long(const char* str)
     return val;
 }
 
-#ifdef CONFIG_ARCH_RISCV
-uint32_t __clzsi2(uint32_t x)
+// The following implementations of CLZ (count leading zeros) and CTZ (count
+// trailing zeros) perform a binary search for the first 1 bit from the
+// beginning (resp. end) of the input. Initially, the focus is the whole input.
+// Then, each iteration determines whether there are any 1 bits set in the
+// upper (resp. lower) half of the current focus. If there are (resp. are not),
+// then the upper half is shifted into the lower half. Either way, the lower
+// half of the current focus becomes the new focus for the next iteration.
+// After enough iterations (6 for 64-bit inputs, 5 for 32-bit inputs), the
+// focus is reduced to a single bit, and the total number of bits shifted can
+// be used to determine the number of zeros before (resp. after) the first 1
+// bit.
+//
+// Although the details vary, the general approach is used in several library
+// implementations, including in LLVM and GCC. Wikipedia has some references:
+// https://en.wikipedia.org/wiki/Find_first_set
+//
+// The current implementation avoids branching. The test that determines
+// whether the upper (resp. lower) half contains any ones directly produces a
+// number which can be used for an unconditional shift. If the upper (resp.
+// lower) half is all zeros, the test produces a zero, and the shift is a
+// no-op. A branchless implementation has the disadvantage that it requires
+// more instructions to execute than one which branches, but the advantage is
+// that none will be mispredicted branches. Whether this is a good tradeoff
+// depends on the branch predictability and the architecture's pipeline depth.
+// The most critical use of clzl in the kernel is in the scheduler priority
+// queue. In the absence of a concrete application and hardware implementation
+// to evaluate the tradeoff, we somewhat arbitrarily choose a branchless
+// implementation. In any case, the compiler might convert this to a branching
+// binary.
+
+// Check some assumptions made by the clzl, clzll, ctzl functions:
+compile_assert(clz_ulong_32_or_64, sizeof(unsigned long) == 4 || sizeof(unsigned long) == 8);
+compile_assert(clz_ullong_64, sizeof(unsigned long long) == 8);
+compile_assert(clz_word_size, sizeof(unsigned long) * 8 == CONFIG_WORD_SIZE);
+
+// Count leading zeros.
+// This implementation contains no branches. If the architecture provides an
+// instruction to set a register to a boolean value on a comparison, then the
+// binary might also avoid branching. A branchless implementation might be
+// preferable on architectures with deep pipelines, or when the maximum
+// priority of runnable threads frequently varies. However, note that the
+// compiler may choose to convert this to a branching implementation.
+//
+// These functions are potentially `UNUSED` because we want to always expose
+// them to verification without necessarily linking them into the kernel
+// binary.
+static UNUSED CONST inline unsigned clz32(uint32_t x)
 {
-    uint32_t count = 0;
-    while ( !(x & 0x80000000U) && count < 34) {
-        x <<= 1;
-        count++;
+    // Compiler builtins typically return int, but we use unsigned internally
+    // to reduce the number of guards we see in the proofs.
+    unsigned count = 32;
+    uint32_t mask = UINT32_MAX;
+
+    // Each iteration i (counting backwards) considers the least significant
+    // 2^(i+1) bits of x as the current focus. At the first iteration, the
+    // focus is the whole input. Each iteration assumes x contains no 1 bits
+    // outside its focus. The iteration contains a test which determines
+    // whether there are any 1 bits in the upper half (2^i bits) of the focus,
+    // setting `bits` to 2^i if there are, or zero if not. Shifting by `bits`
+    // then narrows the focus to the lower 2^i bits and satisfies the
+    // assumption for the next iteration. After the final iteration, the focus
+    // is just the least significant bit, and the most significsnt 1 bit of the
+    // original input (if any) has been shifted into this position. The leading
+    // zero count can be determined from the total shift.
+    //
+    // The iterations are given a very regular structure to facilitate proofs,
+    // while also generating reasonably efficient binary code.
+
+    // The `if (1)` blocks make it easier to reason by chunks in the proofs.
+    if (1) {
+        // iteration 4
+        mask >>= (1 << 4); // 0x0000ffff
+        unsigned bits = ((unsigned)(mask < x)) << 4; // [0, 16]
+        x >>= bits; // <= 0x0000ffff
+        count -= bits; // [16, 32]
     }
+    if (1) {
+        // iteration 3
+        mask >>= (1 << 3); // 0x000000ff
+        unsigned bits = ((unsigned)(mask < x)) << 3; // [0, 8]
+        x >>= bits; // <= 0x000000ff
+        count -= bits; // [8, 16, 24, 32]
+    }
+    if (1) {
+        // iteration 2
+        mask >>= (1 << 2); // 0x0000000f
+        unsigned bits = ((unsigned)(mask < x)) << 2; // [0, 4]
+        x >>= bits; // <= 0x0000000f
+        count -= bits; // [4, 8, 12, ..., 32]
+    }
+    if (1) {
+        // iteration 1
+        mask >>= (1 << 1); // 0x00000003
+        unsigned bits = ((unsigned)(mask < x)) << 1; // [0, 2]
+        x >>= bits; // <= 0x00000003
+        count -= bits; // [2, 4, 6, ..., 32]
+    }
+    if (1) {
+        // iteration 0
+        mask >>= (1 << 0); // 0x00000001
+        unsigned bits = ((unsigned)(mask < x)) << 0; // [0, 1]
+        x >>= bits; // <= 0x00000001
+        count -= bits; // [1, 2, 3, ..., 32]
+    }
+
+    // If the original input was zero, there will have been no shifts, so this
+    // gives a result of 32. Otherwise, x is now exactly 1, so subtracting from
+    // count gives a result from [0, 1, 2, ..., 31].
+    return count - x;
+}
+
+static UNUSED CONST inline unsigned clz64(uint64_t x)
+{
+    unsigned count = 64;
+    uint64_t mask = UINT64_MAX;
+
+    // Although we could implement this using clz32, we spell out the
+    // iterations in full for slightly better code generation at low
+    // optimisation levels, and to allow us to reuse the proof machinery we
+    // developed for clz32.
+    if (1) {
+        // iteration 5
+        mask >>= (1 << 5); // 0x00000000ffffffff
+        unsigned bits = ((unsigned)(mask < x)) << 5; // [0, 32]
+        x >>= bits; // <= 0x00000000ffffffff
+        count -= bits; // [32, 64]
+    }
+    if (1) {
+        // iteration 4
+        mask >>= (1 << 4); // 0x000000000000ffff
+        unsigned bits = ((unsigned)(mask < x)) << 4; // [0, 16]
+        x >>= bits; // <= 0x000000000000ffff
+        count -= bits; // [16, 32, 48, 64]
+    }
+    if (1) {
+        // iteration 3
+        mask >>= (1 << 3); // 0x00000000000000ff
+        unsigned bits = ((unsigned)(mask < x)) << 3; // [0, 8]
+        x >>= bits; // <= 0x00000000000000ff
+        count -= bits; // [8, 16, 24, ..., 64]
+    }
+    if (1) {
+        // iteration 2
+        mask >>= (1 << 2); // 0x000000000000000f
+        unsigned bits = ((unsigned)(mask < x)) << 2; // [0, 4]
+        x >>= bits; // <= 0x000000000000000f
+        count -= bits; // [4, 8, 12, ..., 64]
+    }
+    if (1) {
+        // iteration 1
+        mask >>= (1 << 1); // 0x0000000000000003
+        unsigned bits = ((unsigned)(mask < x)) << 1; // [0, 2]
+        x >>= bits; // <= 0x0000000000000003
+        count -= bits; // [2, 4, 6, ..., 64]
+    }
+    if (1) {
+        // iteration 0
+        mask >>= (1 << 0); // 0x0000000000000001
+        unsigned bits = ((unsigned)(mask < x)) << 0; // [0, 1]
+        x >>= bits; // <= 0x0000000000000001
+        count -= bits; // [1, 2, 3, ..., 64]
+    }
+
+    return count - x;
+}
+
+// Count trailing zeros.
+// See comments on clz32.
+static UNUSED CONST inline unsigned ctz32(uint32_t x)
+{
+    unsigned count = (x == 0);
+    uint32_t mask = UINT32_MAX;
+
+    // Each iteration i (counting backwards) considers the least significant
+    // 2^(i+1) bits of x as the current focus. At the first iteration, the
+    // focus is the whole input. The iteration contains a test which determines
+    // whether there are any 1 bits in the lower half (2^i bits) of the focus,
+    // setting `bits` to zero if there are, or 2^i if not. Shifting by `bits`
+    // then narrows the focus to the lower 2^i bits for the next iteration.
+    // After the final iteration, the focus is just the least significant bit,
+    // and the least significsnt 1 bit of the original input (if any) has been
+    // shifted into this position. The trailing zero count can be determined
+    // from the total shift.
+    //
+    // If the initial input is zero, every iteration causes a shift, for a
+    // total shift count of 31, so in that case, we add one for a total count
+    // of 32. In the comments, xi is the initial value of x.
+    //
+    // The iterations are given a very regular structure to facilitate proofs,
+    // while also generating reasonably efficient binary code.
+
+    if (1) {
+        // iteration 4
+        mask >>= (1 << 4); // 0x0000ffff
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 4; // [0, 16]
+        x >>= bits; // xi != 0 --> x & 0x0000ffff != 0
+        count += bits; // if xi != 0 then [0, 16] else 17
+    }
+    if (1) {
+        // iteration 3
+        mask >>= (1 << 3); // 0x000000ff
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 3; // [0, 8]
+        x >>= bits; // xi != 0 --> x & 0x000000ff != 0
+        count += bits; // if xi != 0 then [0, 8, 16, 24] else 25
+    }
+    if (1) {
+        // iteration 2
+        mask >>= (1 << 2); // 0x0000000f
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 2; // [0, 4]
+        x >>= bits; // xi != 0 --> x & 0x0000000f != 0
+        count += bits; // if xi != 0 then [0, 4, 8, ..., 28] else 29
+    }
+    if (1) {
+        // iteration 1
+        mask >>= (1 << 1); // 0x00000003
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 1; // [0, 2]
+        x >>= bits; // xi != 0 --> x & 0x00000003 != 0
+        count += bits; // if xi != 0 then [0, 2, 4, ..., 30] else 31
+    }
+    if (1) {
+        // iteration 0
+        mask >>= (1 << 0); // 0x00000001
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 0; // [0, 1]
+        x >>= bits; // xi != 0 --> x & 0x00000001 != 0
+        count += bits; // if xi != 0 then [0, 1, 2, ..., 31] else 32
+    }
+
     return count;
 }
 
-uint32_t __ctzsi2(uint32_t x)
+static UNUSED CONST inline unsigned ctz64(uint64_t x)
 {
-    uint32_t count = 0;
-    while ( !(x & 0x000000001) && count <= 32) {
-        x >>= 1;
-        count++;
+    unsigned count = (x == 0);
+    uint64_t mask = UINT64_MAX;
+
+    if (1) {
+        // iteration 5
+        mask >>= (1 << 5); // 0x00000000ffffffff
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 5; // [0, 32]
+        x >>= bits; // xi != 0 --> x & 0x00000000ffffffff != 0
+        count += bits; // if xi != 0 then [0, 32] else 33
     }
+    if (1) {
+        // iteration 4
+        mask >>= (1 << 4); // 0x000000000000ffff
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 4; // [0, 16]
+        x >>= bits; // xi != 0 --> x & 0x000000000000ffff != 0
+        count += bits; // if xi != 0 then [0, 16, 32, 48] else 49
+    }
+    if (1) {
+        // iteration 3
+        mask >>= (1 << 3); // 0x00000000000000ff
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 3; // [0, 8]
+        x >>= bits; // xi != 0 --> x & 0x00000000000000ff != 0
+        count += bits; // if xi != 0 then [0, 8, 16, ..., 56] else 57
+    }
+    if (1) {
+        // iteration 2
+        mask >>= (1 << 2); // 0x000000000000000f
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 2; // [0, 4]
+        x >>= bits; // xi != 0 --> x & 0x000000000000000f != 0
+        count += bits; // if xi != 0 then [0, 4, 8, ..., 60] else 61
+    }
+    if (1) {
+        // iteration 1
+        mask >>= (1 << 1); // 0x0000000000000003
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 1; // [0, 2]
+        x >>= bits; // xi != 0 --> x & 0x0000000000000003 != 0
+        count += bits; // if xi != 0 then [0, 2, 4, ..., 62] else 63
+    }
+    if (1) {
+        // iteration 0
+        mask >>= (1 << 0); // 0x0000000000000001
+        unsigned bits = ((unsigned)((x & mask) == 0)) << 0; // [0, 1]
+        x >>= bits; // xi != 0 --> x & 0x0000000000000001 != 0
+        count += bits; // if xi != 0 then [0, 1, 2, ..., 63] else 64
+    }
+
     return count;
 }
 
-uint32_t __clzdi2(uint64_t x)
+// GCC's builtins will emit calls to these functions when the platform does
+// not provide suitable inline assembly.
+// These are only provided when the relevant config items are set.
+// We define these separately from `ctz32` etc. so that we can verify all of
+// `ctz32` etc. without necessarily linking them into the kernel binary.
+#ifdef CONFIG_CLZ_32
+CONST int __clzsi2(uint32_t x)
 {
-    uint32_t count = 0;
-    while ( !(x & 0x8000000000000000U) && count < 65) {
-        x <<= 1;
-        count++;
-    }
-    return count;
+    return clz32(x);
 }
+#endif
 
-uint32_t __ctzdi2(uint64_t x)
+#ifdef CONFIG_CLZ_64
+CONST int __clzdi2(uint64_t x)
 {
-    uint32_t count = 0;
-    while ( !(x & 0x00000000000000001) && count <= 64) {
-        x >>= 1;
-        count++;
-    }
-    return count;
+    return clz64(x);
 }
-#endif /* CONFIG_ARCH_RISCV */
+#endif
 
+#ifdef CONFIG_CTZ_32
+CONST int __ctzsi2(uint32_t x)
+{
+    return ctz32(x);
+}
+#endif
+
+#ifdef CONFIG_CTZ_64
+CONST int __ctzdi2(uint64_t x)
+{
+    return ctz64(x);
+}
+#endif
+#line 1 "/Users/payas/git/seL4/src/config/default_domain.c"
 /*
  * Copyright 2014, General Dynamics C4 Systems
  *
- * This software may be distributed and modified according to the terms of
- * the GNU General Public License version 2. Note that NO WARRANTY is provided.
- * See "LICENSE_GPLv2.txt" for details.
- *
- * @TAG(GD_GPL)
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
+#include <util.h>
 #include <object/structures.h>
 #include <model/statedata.h>
 
@@ -22555,5 +26182,5 @@ const dschedule_t ksDomSchedule[] = {
     { .domain = 0, .length = 1 },
 };
 
-const word_t ksDomScheduleLength = sizeof(ksDomSchedule) / sizeof(dschedule_t);
+const word_t ksDomScheduleLength = ARRAY_SIZE(ksDomSchedule);
 
